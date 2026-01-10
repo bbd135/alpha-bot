@@ -1,0 +1,44 @@
+name: Daily Alpha Run
+
+on:
+  schedule:
+    - cron: "15 6 * * *"   # Runs at 06:15 UTC every day
+  workflow_dispatch:       # Allows you to click "Run Now" button
+
+permissions:
+  contents: write
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 5+ hours safety limit
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Libraries
+        run: pip install -r requirements.txt
+
+      - name: Run AlphaBot
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+        run: python alpha_screener.py
+
+      - name: Save Results to GitHub
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data results
+          # Only commit if there are new files
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -m "Daily run $(date -u +'%Y-%m-%d')"
+            git push
+          else
+            echo "No changes to commit"
+          fi
