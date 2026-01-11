@@ -15,14 +15,13 @@ from dotenv import load_dotenv
 RUN_START = time.time()
 load_dotenv()
 
-# GitHub Secrets sometimes come in without quotes, this handles both
 API_KEY = os.getenv("FINNHUB_API_KEY")
 if not API_KEY:
     print("⚠️  Warning: FINNHUB_API_KEY not found. Script may fail.")
 
 BASE_URL = "https://finnhub.io/api/v1"
 
-# FOLDER SETUP (Cloud Friendly)
+# FOLDER SETUP
 DATA_DIR = Path("data")
 RESULTS_DIR = Path("results")
 DAILY_DIR = RESULTS_DIR / "daily"
@@ -31,11 +30,11 @@ DATA_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 DAILY_DIR.mkdir(parents=True, exist_ok=True)
 
-# FILE PATHS
-HISTORY_FILE = DATA_DIR / "alpha_picks_history.json"
+# FILES
 GICS_CACHE_FILE = DATA_DIR / "sp1500_gics_map.json"
 RUN_LOG_FILE = RESULTS_DIR / "run_log.jsonl"
 LATEST_CSV = RESULTS_DIR / "latest.csv"
+DIFF_FILE = RESULTS_DIR / "daily_diff.json"
 
 # FILTERS
 MIN_PRICE = 10.0
@@ -44,20 +43,33 @@ EXCLUDE_NON_US = True
 EXCLUDE_REITS = True
 MIN_ANALYSTS = 5
 
-# SENTIMENT
-FLOOR_BUY_RATIO = 0.30
-STREAK_BUY_RATIO = 0.55
-MAX_STREAK_DAYS = 75
+# SENTIMENT (V6.2 Hybrid Stateless)
+FLOOR_BUY_RATIO = 0.30       # Hard floor for inclusion
+STREAK_ON = 0.55             # Threshold to count a period as "Strong"
+STREAK_OFF = 0.52            # Hysteresis floor
+MAX_STREAK_DAYS = 90         # Cap streak score (Revised to 90 days)
+DAYS_INTO_SOFT_CAP = 0.25    # Multiplier for days into current month
 
-# WEIGHTS
+# SCORING WEIGHTS
+# Recency Premium: Rev_S 25%, Mom_S 15%
 WEIGHT_FUNDAMENTALS = 0.70
 WEIGHT_SENTIMENT = 0.30
+FUND_WEIGHTS = {
+    "Value_S": 0.20,
+    "Growth_S": 0.20,
+    "Prof_S": 0.20,
+    "Mom_S": 0.15,
+    "Rev_S": 0.25
+}
+
+BAYESIAN_K = 5               # Confidence constant for Shrinkage
+GLOBAL_BUY_AVG = 0.55        # Prior assumption for Shrinkage
 
 # API SETTINGS
 MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "55"))
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
-print("\n--- ☁️ ALPHA-BOT CLOUD RUNNER (V5.2) ☁️ ---\n")
+print("\n--- ☁️ ALPHA-BOT V6.2 (FINAL HYBRID) ☁️ ---\n")
 
 # =========================
 # CLASSES
@@ -74,56 +86,6 @@ class RateLimiter:
         if dt < self.min_interval:
             time.sleep(self.min_interval - dt)
         self._last = time.time()
-
-class HistoryManager:
-    def __init__(self, filepath):
-        self.filepath = filepath
-        self.data = self._load()
-        self.today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    def _load(self):
-        if self.filepath.exists():
-            try:
-                with open(self.filepath, "r") as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
-
-    def update_streak(self, ticker, buy_ratio):
-        record = self.data.get(ticker, {"streak": 0, "last_processed": "", "last_increment": ""})
-        streak = record.get("streak", 0)
-        last_processed = record.get("last_processed", "")
-
-        if last_processed == self.today_str:
-            return streak
-
-        if buy_ratio < FLOOR_BUY_RATIO:
-            self.data[ticker] = {
-                "streak": 0,
-                "last_processed": self.today_str,
-                "last_increment": record.get("last_increment", "")
-            }
-            return 0
-        elif buy_ratio >= STREAK_BUY_RATIO:
-            new_streak = streak + 1
-            self.data[ticker] = {
-                "streak": new_streak,
-                "last_processed": self.today_str,
-                "last_increment": self.today_str
-            }
-            return new_streak
-        else:
-            self.data[ticker] = {
-                "streak": streak,
-                "last_processed": self.today_str,
-                "last_increment": record.get("last_increment", "")
-            }
-            return streak
-
-    def save(self):
-        with open(self.filepath, "w") as f:
-            json.dump(self.data, f)
 
 class GICSManager:
     def __init__(self, cache_file):
@@ -199,7 +161,7 @@ def safe_num(x):
     except:
         return math.nan
 
-limiter = RateLimiter(60.0 / 55.0)
+limiter = RateLimiter(MIN_INTERVAL)
 session = requests.Session()
 
 def finnhub_get(path, params):
@@ -231,10 +193,63 @@ def blended_rank(df, value_col, group_col, higher_is_better):
     if not higher_is_better: blended = 1.0 - blended
     return (blended * 100.0).clip(0, 100)
 
+def get_ratio(row):
+    try:
+        sb = float(row.get("strongBuy", 0) or 0)
+        b  = float(row.get("buy", 0) or 0)
+        h  = float(row.get("hold", 0) or 0)
+        s  = float(row.get("sell", 0) or 0)
+        ss = float(row.get("strongSell", 0) or 0)
+        tot = sb + b + h + s + ss
+        return ((sb + b) / tot) if tot > 0 else None
+    except:
+        return None
+
+def calculate_stateless_streak(rec_list, today_date):
+    """
+    V6.2: Pre-sorted list input (optimization)
+    """
+    if not rec_list: return 0.0
+    
+    # 1. Check Hysteresis (Current Status)
+    r0 = get_ratio(rec_list[0])
+    if r0 is None: return 0.0
+    
+    r1 = get_ratio(rec_list[1]) if len(rec_list) > 1 else None
+    
+    # Hysteresis Logic
+    was_strong_prev = (r1 is not None and r1 >= STREAK_ON)
+    if was_strong_prev:
+        if r0 < STREAK_OFF: return 0.0
+    else:
+        if r0 < STREAK_ON: return 0.0
+        
+    # 2. Days Into Month (Soft Cap)
+    try:
+        p_date = datetime.strptime(rec_list[0].get("period", ""), "%Y-%m-%d").date()
+        days_into = max(0, (today_date - p_date).days)
+        days_into = min(days_into, 45) # Safety clamp for bad dates
+    except:
+        days_into = 0
+    
+    days_score = days_into * DAYS_INTO_SOFT_CAP
+    
+    # 3. Count Past Strong Periods
+    period_streak = 1 
+    for row in rec_list[1:]:
+        r = get_ratio(row)
+        if r is None or r < STREAK_ON: 
+            break
+        period_streak += 1
+        
+    past_periods = max(0, period_streak - 1)
+    
+    streak_days = (past_periods * 30) + days_score
+    return float(min(streak_days, MAX_STREAK_DAYS))
+
 # =========================
 # MAIN LOGIC
 # =========================
-history = HistoryManager(HISTORY_FILE)
 gics = GICSManager(GICS_CACHE_FILE)
 tracker = ExclusionTracker()
 universe = gics.get_universe()
@@ -264,42 +279,84 @@ for i, sym in enumerate(universe):
 
     # 3. Price
     q = finnhub_get("/quote", {"symbol": sym})
-    price = safe_num(q.get("c")) if q else math.nan
-    if pd.isna(price) or price < MIN_PRICE:
+    if not q or "c" not in q:
+        tracker.log("API_Fail_Quote"); continue
+        
+    price = safe_num(q.get("c"))
+    if pd.isna(price) or price <= 0.01:
+        tracker.log("API_Fail_Quote_BadData"); continue
+    if price < MIN_PRICE:
         tracker.log("Low_Price"); continue
 
     # 4. Analyst
     rec = finnhub_get("/stock/recommendation", {"symbol": sym})
-    rec_total, buy_ratio, rec_change = 0, 0.0, math.nan
+    if not rec or not isinstance(rec, list) or len(rec) == 0:
+        tracker.log("API_Fail_Rec"); continue
     
-    if rec and isinstance(rec, list) and len(rec) >= 1:
-        rec.sort(key=lambda x: x.get("period", ""), reverse=True)
-        d = rec[0]
-        sb, b = float(d.get("strongBuy",0)), float(d.get("buy",0))
-        total = sb + b + float(d.get("hold",0)) + float(d.get("sell",0)) + float(d.get("strongSell",0))
-        if total > 0:
-            rec_total = total
-            buy_ratio = (sb + b) / total
-            # Rec change logic
-            target = today - timedelta(days=90)
-            for row in rec:
-                try:
-                    if datetime.strptime(row.get("period",""), "%Y-%m-%d").date() <= target:
-                        d_old = row
-                        t_old = sum([float(d_old.get(k,0)) for k in ["strongBuy","buy","hold","sell","strongSell"]])
-                        if t_old > 0:
-                            old_r = (float(d_old.get("strongBuy",0))+float(d_old.get("buy",0)))/t_old
-                            rec_change = buy_ratio - old_r
-                        break
-                except: continue
+    # V6.2 Optimization: Sort ONCE here
+    rec.sort(key=lambda x: x.get("period", ""), reverse=True)
+    d = rec[0]
+    
+    sb, b = float(d.get("strongBuy",0)), float(d.get("buy",0))
+    total_analysts = sb + b + float(d.get("hold",0)) + float(d.get("sell",0)) + float(d.get("strongSell",0))
+    
+    if total_analysts == 0:
+        tracker.log("API_Fail_Rec_Zero"); continue
+        
+    buy_ratio = (sb + b) / total_analysts
 
-    if rec_total < MIN_ANALYSTS:
+    # V6.2 Fix: Robust Rec_Change Lookback
+    rec_change = math.nan
+    target_date = today - timedelta(days=90)
+    
+    best_row = None
+    best_diff = 10**9
+    
+    # Pass 1: Prefer rows on/older than target
+    for row in rec:
+        try:
+            row_date = datetime.strptime(row.get("period",""), "%Y-%m-%d").date()
+            if row_date > target_date: continue # Too new
+            
+            # Check validity
+            t_old = sum(float(row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
+            if t_old <= 0: continue
+            
+            diff = (target_date - row_date).days # 0..infinity
+            if diff < best_diff:
+                best_diff = diff
+                best_row = row
+        except: continue
+        
+    # Pass 2: Fallback to closest valid overall if none found
+    if best_row is None:
+        best_diff = 10**9
+        for row in rec:
+            try:
+                row_date = datetime.strptime(row.get("period",""), "%Y-%m-%d").date()
+                t_old = sum(float(row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
+                if t_old <= 0: continue
+                
+                diff = abs((row_date - target_date).days)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_row = row
+            except: continue
+            
+    # Calculate Change if we found a match
+    if best_row is not None:
+        t_old = sum(float(best_row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
+        old_r = (float(best_row.get("strongBuy",0) or 0) + float(best_row.get("buy",0) or 0)) / t_old
+        rec_change = buy_ratio - old_r
+
+    if total_analysts < MIN_ANALYSTS:
         tracker.log("No_Analyst_Coverage"); continue
+        
     if buy_ratio < FLOOR_BUY_RATIO:
-        history.update_streak(sym, buy_ratio)
         tracker.log("Below_Floor_Ratio"); continue
     
-    current_streak = history.update_streak(sym, buy_ratio)
+    # V6.2: Calculate Streak (uses pre-sorted list)
+    current_streak = calculate_stateless_streak(rec, today)
 
     # 5. Metrics
     metric = (finnhub_get("/stock/metric", {"symbol": sym, "metric": "all"}) or {}).get("metric", {})
@@ -328,10 +385,9 @@ for i, sym in enumerate(universe):
         "Mom_12M": safe_num(metric.get("52WeekPriceReturnDaily")),
         "Rev_Change": rec_change,
         "Rec_BuyRatio": buy_ratio,
+        "Analyst_Count": total_analysts,
         "Streak_Days": current_streak
     })
-
-history.save()
 
 # =========================
 # SCORING & OUTPUT
@@ -358,27 +414,75 @@ if rows:
     df["Rev_S"] = blended_rank(df,"Rev_Change","SubIndustry",True).fillna(50)
 
     # Aggregates
-    fund_cols = ["Value_S", "Growth_S", "Prof_S", "Mom_S", "Rev_S"]
-    df["Fundamental_Score"] = df[fund_cols].mean(axis=1)
+    df["Fundamental_Score"] = (
+        df["Value_S"] * FUND_WEIGHTS["Value_S"] +
+        df["Growth_S"] * FUND_WEIGHTS["Growth_S"] +
+        df["Prof_S"]  * FUND_WEIGHTS["Prof_S"] +
+        df["Mom_S"]   * FUND_WEIGHTS["Mom_S"] +
+        df["Rev_S"]   * FUND_WEIGHTS["Rev_S"]
+    )
     
-    df["Consensus_Score"] = blended_rank(df,"Rec_BuyRatio","SubIndustry",True).fillna(50)
+    # Bayesian Shrinkage
+    N = df["Analyst_Count"]
+    K = BAYESIAN_K
+    df["Shrunk_Ratio"] = (N / (N + K)) * df["Rec_BuyRatio"] + (K / (N + K)) * GLOBAL_BUY_AVG
+    
+    df["Consensus_Score"] = blended_rank(df, "Shrunk_Ratio", "SubIndustry", True).fillna(50)
     df["Streak_Score"] = (df["Streak_Days"].clip(upper=MAX_STREAK_DAYS)/MAX_STREAK_DAYS)*100
     df["Sentiment_Score"] = (df["Consensus_Score"]*0.6) + (df["Streak_Score"]*0.4)
     
     df["Alpha_Score"] = (df["Fundamental_Score"]*WEIGHT_FUNDAMENTALS) + (df["Sentiment_Score"]*WEIGHT_SENTIMENT)
     
     # Gate
-    df["Min_Fund_Factor"] = df[fund_cols].min(axis=1)
+    df["Min_Fund_Factor"] = df[["Value_S", "Growth_S", "Prof_S", "Mom_S", "Rev_S"]].min(axis=1)
     df.loc[df["Min_Fund_Factor"] < 25, "Alpha_Score"] = df.loc[df["Min_Fund_Factor"] < 25, "Alpha_Score"].clip(upper=60)
     
-    df = df.sort_values("Alpha_Score", ascending=False)
+    # V6.2 Fix: Reset Index before Diff Generation so ranks are correct
+    df = df.sort_values("Alpha_Score", ascending=False).reset_index(drop=True)
     
-    # Save Results
-    daily_path = DAILY_DIR / f"alpha_v5_results_{today_str}.csv"
+    daily_path = DAILY_DIR / f"alpha_v6_results_{today_str}.csv"
     df.to_csv(daily_path, index=False)
     df.to_csv(LATEST_CSV, index=False)
     
     print(f"✅ Saved to {daily_path}")
+
+    # --- TRACKING: Generate Diff ---
+    daily_files = sorted(DAILY_DIR.glob("alpha_v6_results_*.csv"))
+    
+    diff_data = {"new_entrants": [], "movers": []}
+    
+    if len(daily_files) >= 2:
+        prev_file = daily_files[-2]
+        try:
+            prev_df = pd.read_csv(prev_file)
+            
+            # V6.2 Fix: Ensure Previous DF is also ranked 1..N
+            prev_df = prev_df.sort_values("Alpha_Score", ascending=False).reset_index(drop=True)
+            
+            top_today = df.head(20)["Ticker"].tolist()
+            top_prev = prev_df.head(20)["Ticker"].tolist()
+            
+            new_entrants = [t for t in top_today if t not in top_prev]
+            diff_data["new_entrants"] = new_entrants
+            
+            rank_today = {t: i for i, t in enumerate(df["Ticker"], start=1)}
+            rank_prev = {t: i for i, t in enumerate(prev_df["Ticker"], start=1)}
+            
+            movers = []
+            for t in top_today:
+                if t in rank_prev:
+                    change = rank_prev[t] - rank_today[t] # Positive = Moved Up
+                    movers.append({"ticker": t, "change": int(change)})
+                else:
+                    movers.append({"ticker": t, "change": "New"})
+            
+            diff_data["movers"] = movers
+            
+            with open(DIFF_FILE, "w") as f:
+                json.dump(diff_data, f)
+                
+        except Exception as e:
+            print(f"⚠️ Diff generation failed: {e}")
 
 # LOGGING
 runtime_sec = int(time.time() - RUN_START)
