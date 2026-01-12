@@ -43,17 +43,17 @@ EXCLUDE_NON_US = True
 EXCLUDE_REITS = True
 MIN_ANALYSTS = 5
 
-# SENTIMENT (V6.2 Hybrid Stateless)
-FLOOR_BUY_RATIO = 0.30       # Hard floor for inclusion
-STREAK_ON = 0.55             # Threshold to count a period as "Strong"
-STREAK_OFF = 0.52            # Hysteresis floor
-MAX_STREAK_DAYS = 90         # Cap streak score (Revised to 90 days)
+# SENTIMENT (V6.5 Strict & Clamped)
+FLOOR_BUY_RATIO = 0.65       # Hard floor: Shrunk Score < 65% = Kicked out
+STREAK_ON = 0.80             # Streak Start: Shrunk Score >= 80%
+STREAK_OFF = 0.75            # Hysteresis: Shrunk Score >= 75%
+MAX_STREAK_DAYS = 90         # Hard Cap for scoring AND display
 DAYS_INTO_SOFT_CAP = 0.25    # Multiplier for days into current month
 
 # SCORING WEIGHTS
-# Recency Premium: Rev_S 25%, Mom_S 15%
 WEIGHT_FUNDAMENTALS = 0.70
 WEIGHT_SENTIMENT = 0.30
+
 FUND_WEIGHTS = {
     "Value_S": 0.20,
     "Growth_S": 0.20,
@@ -62,14 +62,19 @@ FUND_WEIGHTS = {
     "Rev_S": 0.25
 }
 
-BAYESIAN_K = 5               # Confidence constant for Shrinkage
-GLOBAL_BUY_AVG = 0.55        # Prior assumption for Shrinkage
+MOM_WEIGHTS = {
+    "Range": 0.40,
+    "12M": 0.60
+}
+
+BAYESIAN_K = 5               
+GLOBAL_BUY_AVG = 0.55        
 
 # API SETTINGS
 MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "55"))
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
-print("\n--- ☁️ ALPHA-BOT V6.2 (FINAL HYBRID) ☁️ ---\n")
+print("\n--- ☁️ ALPHA-BOT V6.5 (FINAL) ☁️ ---\n")
 
 # =========================
 # CLASSES
@@ -193,7 +198,7 @@ def blended_rank(df, value_col, group_col, higher_is_better):
     if not higher_is_better: blended = 1.0 - blended
     return (blended * 100.0).clip(0, 100)
 
-def get_ratio(row):
+def get_shrunk_ratio(row):
     try:
         sb = float(row.get("strongBuy", 0) or 0)
         b  = float(row.get("buy", 0) or 0)
@@ -201,51 +206,68 @@ def get_ratio(row):
         s  = float(row.get("sell", 0) or 0)
         ss = float(row.get("strongSell", 0) or 0)
         tot = sb + b + h + s + ss
-        return ((sb + b) / tot) if tot > 0 else None
+        
+        if tot == 0: return None
+        
+        raw_ratio = (sb + b) / tot
+        return (tot / (tot + BAYESIAN_K)) * raw_ratio + (BAYESIAN_K / (tot + BAYESIAN_K)) * GLOBAL_BUY_AVG
     except:
         return None
 
-def calculate_stateless_streak(rec_list, today_date):
+def calculate_asymptotic_score(streak_days):
     """
-    V6.2: Pre-sorted list input (optimization)
+    Score = 100 * (1 - e^(-k * days))
+    k=0.021 means 90 days ~= 85 score.
     """
-    if not rec_list: return 0.0
+    k = 0.021
+    return 100.0 * (1.0 - math.exp(-k * streak_days))
+
+def calculate_streak_shrunk(rec_list, today_date):
+    """
+    Returns: (raw_days, capped_days, score)
+    """
+    if not rec_list: return 0.0, 0.0, 0.0
     
-    # 1. Check Hysteresis (Current Status)
-    r0 = get_ratio(rec_list[0])
-    if r0 is None: return 0.0
+    # 1. Hysteresis Check
+    r0 = get_shrunk_ratio(rec_list[0])
+    if r0 is None: return 0.0, 0.0, 0.0
     
-    r1 = get_ratio(rec_list[1]) if len(rec_list) > 1 else None
+    r1 = get_shrunk_ratio(rec_list[1]) if len(rec_list) > 1 else None
     
-    # Hysteresis Logic
     was_strong_prev = (r1 is not None and r1 >= STREAK_ON)
+    
     if was_strong_prev:
-        if r0 < STREAK_OFF: return 0.0
+        if r0 < STREAK_OFF: return 0.0, 0.0, 0.0
     else:
-        if r0 < STREAK_ON: return 0.0
+        if r0 < STREAK_ON: return 0.0, 0.0, 0.0
         
-    # 2. Days Into Month (Soft Cap)
+    # 2. Days Into Month
     try:
         p_date = datetime.strptime(rec_list[0].get("period", ""), "%Y-%m-%d").date()
         days_into = max(0, (today_date - p_date).days)
-        days_into = min(days_into, 45) # Safety clamp for bad dates
+        days_into = min(days_into, 45)
     except:
         days_into = 0
     
-    days_score = days_into * DAYS_INTO_SOFT_CAP
+    days_val = days_into * DAYS_INTO_SOFT_CAP
     
-    # 3. Count Past Strong Periods
+    # 3. Past Periods
     period_streak = 1 
     for row in rec_list[1:]:
-        r = get_ratio(row)
+        r = get_shrunk_ratio(row)
         if r is None or r < STREAK_ON: 
             break
         period_streak += 1
         
     past_periods = max(0, period_streak - 1)
     
-    streak_days = (past_periods * 30) + days_score
-    return float(min(streak_days, MAX_STREAK_DAYS))
+    total_days = (past_periods * 30) + days_val
+    
+    # V6.5: Calculate Raw, Capped, and Score separately
+    capped_days = min(total_days, MAX_STREAK_DAYS)
+    score = calculate_asymptotic_score(capped_days)
+    
+    return float(total_days), float(capped_days), float(score)
 
 # =========================
 # MAIN LOGIC
@@ -293,7 +315,6 @@ for i, sym in enumerate(universe):
     if not rec or not isinstance(rec, list) or len(rec) == 0:
         tracker.log("API_Fail_Rec"); continue
     
-    # V6.2 Optimization: Sort ONCE here
     rec.sort(key=lambda x: x.get("period", ""), reverse=True)
     d = rec[0]
     
@@ -303,32 +324,32 @@ for i, sym in enumerate(universe):
     if total_analysts == 0:
         tracker.log("API_Fail_Rec_Zero"); continue
         
-    buy_ratio = (sb + b) / total_analysts
+    raw_buy_ratio = (sb + b) / total_analysts
+    
+    N = total_analysts
+    K = BAYESIAN_K
+    shrunk_ratio = (N / (N + K)) * raw_buy_ratio + (K / (N + K)) * GLOBAL_BUY_AVG
 
-    # V6.2 Fix: Robust Rec_Change Lookback
+    # Smart Lookback (90 days)
     rec_change = math.nan
     target_date = today - timedelta(days=90)
-    
     best_row = None
     best_diff = 10**9
     
-    # Pass 1: Prefer rows on/older than target
     for row in rec:
         try:
             row_date = datetime.strptime(row.get("period",""), "%Y-%m-%d").date()
-            if row_date > target_date: continue # Too new
+            if row_date > target_date: continue 
             
-            # Check validity
             t_old = sum(float(row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
             if t_old <= 0: continue
             
-            diff = (target_date - row_date).days # 0..infinity
+            diff = (target_date - row_date).days
             if diff < best_diff:
                 best_diff = diff
                 best_row = row
         except: continue
         
-    # Pass 2: Fallback to closest valid overall if none found
     if best_row is None:
         best_diff = 10**9
         for row in rec:
@@ -343,20 +364,19 @@ for i, sym in enumerate(universe):
                     best_row = row
             except: continue
             
-    # Calculate Change if we found a match
     if best_row is not None:
         t_old = sum(float(best_row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
         old_r = (float(best_row.get("strongBuy",0) or 0) + float(best_row.get("buy",0) or 0)) / t_old
-        rec_change = buy_ratio - old_r
+        rec_change = raw_buy_ratio - old_r
 
     if total_analysts < MIN_ANALYSTS:
         tracker.log("No_Analyst_Coverage"); continue
         
-    if buy_ratio < FLOOR_BUY_RATIO:
+    if shrunk_ratio < FLOOR_BUY_RATIO:
         tracker.log("Below_Floor_Ratio"); continue
     
-    # V6.2: Calculate Streak (uses pre-sorted list)
-    current_streak = calculate_stateless_streak(rec, today)
+    # V6.5: Get all 3 values
+    streak_days_raw, streak_days_capped, streak_score_val = calculate_streak_shrunk(rec, today)
 
     # 5. Metrics
     metric = (finnhub_get("/stock/metric", {"symbol": sym, "metric": "all"}) or {}).get("metric", {})
@@ -366,6 +386,7 @@ for i, sym in enumerate(universe):
     ps = safe_num(metric.get("psTTM"))
     rev_g = safe_num(metric.get("revenueGrowthTTMYoy"))
     if pd.isna(rev_g): rev_g = safe_num(metric.get("revenueGrowth5Y"))
+    eps_g = safe_num(metric.get("epsGrowth5Y"))
     
     h52 = safe_num(metric.get("52WeekHigh"))
     l52 = safe_num(metric.get("52WeekLow"))
@@ -376,17 +397,19 @@ for i, sym in enumerate(universe):
         "Price": price,
         "PE_Rank": pe if (pe and pe > 0) else 1e6,
         "PS_Rank": ps if (ps and ps > 0) else 1e6,
-        "EPS_Growth": safe_num(metric.get("epsGrowth5Y")),
+        "EPS_Growth": eps_g,
         "Rev_Growth": rev_g,
         "ROE": safe_num(metric.get("roeTTM")),
         "Op_Margin": safe_num(metric.get("operatingMarginTTM")),
         "Mom_Range": max(0.0, min(1.0, rng)),
-        "Mom_3M": safe_num(metric.get("3MonthPriceReturnDaily")),
         "Mom_12M": safe_num(metric.get("52WeekPriceReturnDaily")),
         "Rev_Change": rec_change,
-        "Rec_BuyRatio": buy_ratio,
+        "Rec_BuyRatio": raw_buy_ratio,
+        "Shrunk_Ratio": shrunk_ratio,
         "Analyst_Count": total_analysts,
-        "Streak_Days": current_streak
+        "Streak_Days": streak_days_capped, # Main display column now capped
+        "Streak_Days_Raw": streak_days_raw, # New column for auditing
+        "Streak_Score": streak_score_val
     })
 
 # =========================
@@ -407,9 +430,8 @@ if rows:
                               blended_rank(df,"Op_Margin","SubIndustry",True)], axis=1).fillna(50).mean(axis=1)
     
     m1 = blended_rank(df,"Mom_Range","SubIndustry",True).fillna(50)
-    m2 = blended_rank(df,"Mom_3M","SubIndustry",True).fillna(50)
-    m3 = blended_rank(df,"Mom_12M","SubIndustry",True).fillna(50)
-    df["Mom_S"] = (m1 * 0.4) + (m2 * 0.4) + (m3 * 0.2)
+    m2 = blended_rank(df,"Mom_12M","SubIndustry",True).fillna(50)
+    df["Mom_S"] = (m1 * MOM_WEIGHTS["Range"]) + (m2 * MOM_WEIGHTS["12M"])
     
     df["Rev_S"] = blended_rank(df,"Rev_Change","SubIndustry",True).fillna(50)
 
@@ -422,22 +444,25 @@ if rows:
         df["Rev_S"]   * FUND_WEIGHTS["Rev_S"]
     )
     
-    # Bayesian Shrinkage
-    N = df["Analyst_Count"]
-    K = BAYESIAN_K
-    df["Shrunk_Ratio"] = (N / (N + K)) * df["Rec_BuyRatio"] + (K / (N + K)) * GLOBAL_BUY_AVG
-    
     df["Consensus_Score"] = blended_rank(df, "Shrunk_Ratio", "SubIndustry", True).fillna(50)
-    df["Streak_Score"] = (df["Streak_Days"].clip(upper=MAX_STREAK_DAYS)/MAX_STREAK_DAYS)*100
-    df["Sentiment_Score"] = (df["Consensus_Score"]*0.6) + (df["Streak_Score"]*0.4)
+    # Streak Score is already calculated (capped)
     
+    df["Sentiment_Score"] = (df["Consensus_Score"]*0.6) + (df["Streak_Score"]*0.4)
     df["Alpha_Score"] = (df["Fundamental_Score"]*WEIGHT_FUNDAMENTALS) + (df["Sentiment_Score"]*WEIGHT_SENTIMENT)
     
     # Gate
     df["Min_Fund_Factor"] = df[["Value_S", "Growth_S", "Prof_S", "Mom_S", "Rev_S"]].min(axis=1)
     df.loc[df["Min_Fund_Factor"] < 25, "Alpha_Score"] = df.loc[df["Min_Fund_Factor"] < 25, "Alpha_Score"].clip(upper=60)
     
-    # V6.2 Fix: Reset Index before Diff Generation so ranks are correct
+    # V6.5 PENALTIES
+    # 1. Negative EPS (Severe 50%)
+    mask_neg_eps = (df["EPS_Growth"].notna()) & (df["EPS_Growth"] < 0)
+    df.loc[mask_neg_eps, "Alpha_Score"] = df.loc[mask_neg_eps, "Alpha_Score"] * 0.50
+    
+    # 2. Missing EPS (Severe 25%)
+    mask_nan_eps = df["EPS_Growth"].isna()
+    df.loc[mask_nan_eps, "Alpha_Score"] = df.loc[mask_nan_eps, "Alpha_Score"] * 0.75
+    
     df = df.sort_values("Alpha_Score", ascending=False).reset_index(drop=True)
     
     daily_path = DAILY_DIR / f"alpha_v6_results_{today_str}.csv"
@@ -446,17 +471,14 @@ if rows:
     
     print(f"✅ Saved to {daily_path}")
 
-    # --- TRACKING: Generate Diff ---
+    # --- TRACKING ---
     daily_files = sorted(DAILY_DIR.glob("alpha_v6_results_*.csv"))
-    
     diff_data = {"new_entrants": [], "movers": []}
     
     if len(daily_files) >= 2:
         prev_file = daily_files[-2]
         try:
             prev_df = pd.read_csv(prev_file)
-            
-            # V6.2 Fix: Ensure Previous DF is also ranked 1..N
             prev_df = prev_df.sort_values("Alpha_Score", ascending=False).reset_index(drop=True)
             
             top_today = df.head(20)["Ticker"].tolist()
@@ -471,7 +493,7 @@ if rows:
             movers = []
             for t in top_today:
                 if t in rank_prev:
-                    change = rank_prev[t] - rank_today[t] # Positive = Moved Up
+                    change = rank_prev[t] - rank_today[t] 
                     movers.append({"ticker": t, "change": int(change)})
                 else:
                     movers.append({"ticker": t, "change": "New"})

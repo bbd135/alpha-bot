@@ -68,7 +68,14 @@ df = load_results(choice)
 st.subheader("🩺 Model Health")
 
 if not run_df.empty:
-    run_df = run_df.sort_values("date")
+    # Deterministic Deduplication:
+    # 1. Assign an index to preserve file order (latest runs are at the bottom)
+    run_df["run_idx"] = range(len(run_df))
+    # 2. Sort by date and then by index
+    run_df = run_df.sort_values(["date", "run_idx"])
+    # 3. Drop duplicates keeping the last one
+    run_df = run_df.drop_duplicates(subset=["date"], keep="last")
+    
     last = run_df.iloc[-1]
 
     # Metrics
@@ -91,14 +98,13 @@ if not run_df.empty:
         totals = ex_df.sum().sort_values(ascending=False)
         top_cols = list(totals.head(8).index)
         if top_cols:
-            st.bar_chart(ex_df[top_cols].iloc[-5:]) # Show last 5 runs only
+            st.bar_chart(ex_df[top_cols].iloc[-5:]) # Show last 5 unique dates
 else:
     st.info("No run log found.")
 
 # =========================
 # SECTION 2: TRACKING (NEW)
 # =========================
-# Only show this if viewing the latest results
 if choice == "(latest)" and DIFF_FILE.exists():
     try:
         with open(DIFF_FILE, "r") as f:
@@ -137,6 +143,7 @@ else:
     st.write(f"Showing top **{top_n}** for: **{choice}**")
     
     # Columns to display (V6 specific)
+    # Note: 'Streak_Days' here will display the CAPPED value from the CSV
     cols_to_show = [
         "Ticker", "Alpha_Score", "Fundamental_Score", "Sentiment_Score", 
         "Streak_Days", "Analyst_Count", "Rec_BuyRatio", "Sector"
