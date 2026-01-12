@@ -43,16 +43,16 @@ EXCLUDE_NON_US = True
 EXCLUDE_REITS = True
 MIN_ANALYSTS = 5
 
-# SENTIMENT (V6.5 Strict & Clamped)
+# SENTIMENT (V6.6 Strict & Clamped)
 FLOOR_BUY_RATIO = 0.65       # Hard floor: Shrunk Score < 65% = Kicked out
 STREAK_ON = 0.80             # Streak Start: Shrunk Score >= 80%
 STREAK_OFF = 0.75            # Hysteresis: Shrunk Score >= 75%
 MAX_STREAK_DAYS = 90         # Hard Cap for scoring AND display
 DAYS_INTO_SOFT_CAP = 0.25    # Multiplier for days into current month
 
-# SCORING WEIGHTS
-WEIGHT_FUNDAMENTALS = 0.70
-WEIGHT_SENTIMENT = 0.30
+# SCORING WEIGHTS (V6.6: 80/20 Split)
+WEIGHT_FUNDAMENTALS = 0.80   # Stronger focus on financial health
+WEIGHT_SENTIMENT = 0.20      # Reduced analyst/streak noise
 
 FUND_WEIGHTS = {
     "Value_S": 0.20,
@@ -74,7 +74,7 @@ GLOBAL_BUY_AVG = 0.55
 MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "55"))
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
-print("\n--- ☁️ ALPHA-BOT V6.5 (FINAL) ☁️ ---\n")
+print("\n--- ☁️ ALPHA-BOT V6.6 (SMART GROWTH & AUDIT) ☁️ ---\n")
 
 # =========================
 # CLASSES
@@ -263,7 +263,7 @@ def calculate_streak_shrunk(rec_list, today_date):
     
     total_days = (past_periods * 30) + days_val
     
-    # V6.5: Calculate Raw, Capped, and Score separately
+    # Clamp before scoring
     capped_days = min(total_days, MAX_STREAK_DAYS)
     score = calculate_asymptotic_score(capped_days)
     
@@ -375,18 +375,36 @@ for i, sym in enumerate(universe):
     if shrunk_ratio < FLOOR_BUY_RATIO:
         tracker.log("Below_Floor_Ratio"); continue
     
-    # V6.5: Get all 3 values
     streak_days_raw, streak_days_capped, streak_score_val = calculate_streak_shrunk(rec, today)
 
     # 5. Metrics
     metric = (finnhub_get("/stock/metric", {"symbol": sym, "metric": "all"}) or {}).get("metric", {})
     
+    # V6.6: SMART EPS LOGIC (Recency Preference)
+    eps_ttm = safe_num(metric.get("epsGrowthTTMYoy"))
+    eps_3y  = safe_num(metric.get("epsGrowth3Y"))
+    eps_5y  = safe_num(metric.get("epsGrowth5Y"))
+    
+    eps_g = eps_ttm
+    eps_src = "TTM_YoY"
+    
+    if pd.isna(eps_g):
+        eps_g = eps_3y
+        eps_src = "3Y"
+        
+    if pd.isna(eps_g):
+        eps_g = eps_5y
+        eps_src = "5Y"
+        
+    if pd.isna(eps_g):
+        eps_src = "NA"
+    
     # 6. Data Row
     pe = safe_num(metric.get("peBasicExclExtraTTM"))
     ps = safe_num(metric.get("psTTM"))
+    
     rev_g = safe_num(metric.get("revenueGrowthTTMYoy"))
     if pd.isna(rev_g): rev_g = safe_num(metric.get("revenueGrowth5Y"))
-    eps_g = safe_num(metric.get("epsGrowth5Y"))
     
     h52 = safe_num(metric.get("52WeekHigh"))
     l52 = safe_num(metric.get("52WeekLow"))
@@ -398,6 +416,10 @@ for i, sym in enumerate(universe):
         "PE_Rank": pe if (pe and pe > 0) else 1e6,
         "PS_Rank": ps if (ps and ps > 0) else 1e6,
         "EPS_Growth": eps_g,
+        "EPS_Growth_Source": eps_src, # AUDIT
+        "EPS_Growth_TTMYoY": eps_ttm, # AUDIT
+        "EPS_Growth_3Y": eps_3y,      # AUDIT
+        "EPS_Growth_5Y": eps_5y,      # AUDIT
         "Rev_Growth": rev_g,
         "ROE": safe_num(metric.get("roeTTM")),
         "Op_Margin": safe_num(metric.get("operatingMarginTTM")),
@@ -407,8 +429,8 @@ for i, sym in enumerate(universe):
         "Rec_BuyRatio": raw_buy_ratio,
         "Shrunk_Ratio": shrunk_ratio,
         "Analyst_Count": total_analysts,
-        "Streak_Days": streak_days_capped, # Main display column now capped
-        "Streak_Days_Raw": streak_days_raw, # New column for auditing
+        "Streak_Days": streak_days_capped, 
+        "Streak_Days_Raw": streak_days_raw,
         "Streak_Score": streak_score_val
     })
 
@@ -445,7 +467,6 @@ if rows:
     )
     
     df["Consensus_Score"] = blended_rank(df, "Shrunk_Ratio", "SubIndustry", True).fillna(50)
-    # Streak Score is already calculated (capped)
     
     df["Sentiment_Score"] = (df["Consensus_Score"]*0.6) + (df["Streak_Score"]*0.4)
     df["Alpha_Score"] = (df["Fundamental_Score"]*WEIGHT_FUNDAMENTALS) + (df["Sentiment_Score"]*WEIGHT_SENTIMENT)
@@ -454,7 +475,7 @@ if rows:
     df["Min_Fund_Factor"] = df[["Value_S", "Growth_S", "Prof_S", "Mom_S", "Rev_S"]].min(axis=1)
     df.loc[df["Min_Fund_Factor"] < 25, "Alpha_Score"] = df.loc[df["Min_Fund_Factor"] < 25, "Alpha_Score"].clip(upper=60)
     
-    # V6.5 PENALTIES
+    # V6.6 PENALTIES (Using the Smart EPS metric)
     # 1. Negative EPS (Severe 50%)
     mask_neg_eps = (df["EPS_Growth"].notna()) & (df["EPS_Growth"] < 0)
     df.loc[mask_neg_eps, "Alpha_Score"] = df.loc[mask_neg_eps, "Alpha_Score"] * 0.50
