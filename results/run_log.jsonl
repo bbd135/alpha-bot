@@ -1,2 +1,4 @@
 {"date": "2026-01-10", "runtime_sec": 5799, "universe": 1506, "eligible": 1143, "exclusions": {"Below_Floor_Ratio": 157, "REIT_GICS": 102, "Low_Price": 43, "Non_US": 54, "No_Analyst_Coverage": 5, "Small_Cap": 1, "API_Fail_Profile": 1}}
 {"date": "2026-01-11", "runtime_sec": 5789, "universe": 1506, "eligible": 1134, "exclusions": {"Below_Floor_Ratio": 156, "REIT_GICS": 102, "Low_Price": 53, "Non_US": 54, "No_Analyst_Coverage": 5, "Small_Cap": 1, "API_Fail_Profile": 1}}
+{"date": "2026-01-11", "runtime_sec": 5784, "universe": 1506, "eligible": 1138, "exclusions": {"Below_Floor_Ratio": 157, "REIT_GICS": 102, "Low_Price": 43, "Non_US": 54, "API_Fail_Rec": 5, "Small_Cap": 1, "API_Fail_Quote": 5, "API_Fail_Profile": 1}}
+{"date": "2026-01-12", "runtime_sec": 5787, "universe": 1506, "eligible": 1143, "exclusions": {"Below_Floor_Ratio": 157, "REIT_GICS": 102, "Low_Price": 43, "Non_US": 54, "API_Fail_Rec": 5, "Small_Cap": 1, "API_Fail_Profile": 1}}
