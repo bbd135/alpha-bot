@@ -7,3 +7,4 @@
 {"date": "2026-01-13", "runtime_sec": 5392, "universe": 1506, "eligible": 593, "exclusions": {"Below_Floor_Ratio": 706, "REIT_GICS": 102, "Low_Price": 42, "Non_US": 54, "API_Fail_Rec": 5, "Small_Cap": 1, "API_Fail_Profile": 3}}
 {"date": "2026-01-14", "runtime_sec": 5185, "universe": 1506, "eligible": 593, "exclusions": {"Below_Floor_Ratio": 707, "REIT_GICS": 102, "Low_Price": 41, "Non_US": 54, "API_Fail_Rec": 6, "Small_Cap": 2, "API_Fail_Profile": 1}}
 {"date": "2026-01-15", "runtime_sec": 5183, "universe": 1506, "eligible": 592, "exclusions": {"Below_Floor_Ratio": 707, "REIT_GICS": 102, "Low_Price": 42, "Non_US": 54, "API_Fail_Rec": 6, "Small_Cap": 2, "API_Fail_Profile": 1}}
+{"date": "2026-01-16", "runtime_sec": 5347, "universe": 1506, "eligible": 592, "exclusions": {"Below_Floor_Ratio": 708, "REIT_GICS": 102, "Low_Price": 41, "Non_US": 54, "API_Fail_Rec": 6, "API_Fail_Profile": 2, "Small_Cap": 1}}
