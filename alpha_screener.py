@@ -44,14 +44,14 @@ EXCLUDE_NON_US = True
 EXCLUDE_REITS = True
 MIN_ANALYSTS = 5
 
-# SENTIMENT (V7.5 Strict & Clamped)
+# SENTIMENT (V7.6 Strict & Clamped)
 FLOOR_BUY_RATIO = 0.65       # Hard floor: Shrunk Score < 65% = Kicked out
 STREAK_ON = 0.80             # Streak Start: Shrunk Score >= 80%
 STREAK_OFF = 0.75            # Hysteresis: Shrunk Score >= 75%
 MAX_STREAK_DAYS = 90         # Hard Cap for scoring AND display
 DAYS_INTO_SOFT_CAP = 0.25    # Multiplier for days into current month
 
-# SCORING WEIGHTS (V7.5: Quality Focus)
+# SCORING WEIGHTS (V7.6: Quality Focus)
 WEIGHT_FUNDAMENTALS = 0.80   
 WEIGHT_SENTIMENT = 0.20      
 
@@ -72,10 +72,11 @@ BAYESIAN_K = 5
 GLOBAL_BUY_AVG = 0.55        
 
 # API SETTINGS
-MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "55"))
+# V7.6: Default increased to 290 for Paid Plan (Safety buffer for 300 limit)
+MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "290"))
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
-print("\n--- ALPHA-BOT V7.5 (QUANT ENGINE) ---\n")
+print("\n--- ALPHA-BOT V7.6 (HIGH SPEED) ---\n")
 
 # =========================
 # CLASSES
@@ -284,7 +285,7 @@ today_str = today.strftime("%Y-%m-%d")
 OUTPUT_FILENAME = f"alpha_v7_results_{today_str}.csv"
 
 for i, sym in enumerate(universe):
-    if i % 50 == 0: print(f"Processing {i}/{len(universe)}...", end="\r")
+    if i % 100 == 0: print(f"Processing {i}/{len(universe)}...", end="\r")
     
     # 1. Profile
     p2 = finnhub_get("/stock/profile2", {"symbol": sym})
@@ -352,6 +353,20 @@ for i, sym in enumerate(universe):
                 best_row = row
         except: continue
         
+    if best_row is None:
+        best_diff = 10**9
+        for row in rec:
+            try:
+                row_date = datetime.strptime(row.get("period",""), "%Y-%m-%d").date()
+                t_old = sum(float(row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
+                if t_old <= 0: continue
+                
+                diff = abs((row_date - target_date).days)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_row = row
+            except: continue
+            
     if best_row is not None:
         t_old = sum(float(best_row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
         old_r = (float(best_row.get("strongBuy",0) or 0) + float(best_row.get("buy",0) or 0)) / t_old
@@ -383,7 +398,7 @@ for i, sym in enumerate(universe):
         eps_src = "5Y"
     if pd.isna(eps_g): eps_src = "NA"
     
-    # 6. Data Row (V7.5 PRO METRICS)
+    # 6. Data Row (V7.6 PRO METRICS)
     pe = safe_num(metric.get("peBasicExclExtraTTM"))
     ps = safe_num(metric.get("psTTM"))
     
@@ -412,7 +427,7 @@ for i, sym in enumerate(universe):
     h52 = safe_num(metric.get("52WeekHigh"))
     l52 = safe_num(metric.get("52WeekLow"))
     
-    # V7.5 MOMENTUM RANGE FIX (Strict NaN Handling)
+    # MOMENTUM RANGE FIX
     if pd.isna(price) or pd.isna(h52) or pd.isna(l52) or h52 <= l52:
         mom_range = np.nan
     else:
@@ -462,14 +477,12 @@ if rows:
     v_ps = blended_rank(df,"PS_Rank","SubIndustry",False)
     v_ev = blended_rank(df,"EV_EBITDA_Used","SubIndustry",False)
     
-    # V7.5 FIX: Prevent NaN propagation
     df["Value_S"] = pd.concat([v_pe, v_ps, v_ev], axis=1).mean(axis=1).fillna(50)
     
     # 2. GROWTH
     g_eps = blended_rank(df,"EPS_Growth","SubIndustry",True)
     g_rev = blended_rank(df,"Rev_Growth","SubIndustry",True)
     
-    # V7.5 FIX: Prevent NaN propagation
     df["Growth_S"] = pd.concat([g_eps, g_rev], axis=1).mean(axis=1).fillna(50)
     
     # 3. PROFITABILITY
@@ -480,7 +493,6 @@ if rows:
     mask_roic_missing = df["ROIC"].isna()
     p_roic[mask_roic_missing] = np.nan
     
-    # V7.5 FIX: Prevent NaN propagation
     df["Prof_S"] = pd.concat([p_roe, p_margin, p_roic], axis=1).mean(axis=1).fillna(50)
     
     # Smart Margin Floor (Normalize %)
@@ -510,7 +522,7 @@ if rows:
     df["Sentiment_Score"] = (df["Consensus_Score"]*0.6) + (df["Streak_Score"]*0.4)
     df["Alpha_Score"] = (df["Fundamental_Score"]*WEIGHT_FUNDAMENTALS) + (df["Sentiment_Score"]*WEIGHT_SENTIMENT)
     
-    # --- V7.5 GATES & PENALTIES ---
+    # --- V7.6 GATES & PENALTIES ---
     df["Alpha_Score_PreGates"] = df["Alpha_Score"] 
     
     # 1. Momentum Gate

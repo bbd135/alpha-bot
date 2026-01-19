@@ -12,8 +12,8 @@ RUN_LOG = RESULTS_DIR / "run_log.jsonl"
 LATEST = RESULTS_DIR / "latest.csv"
 DIFF_FILE = RESULTS_DIR / "daily_diff.json"
 
-st.set_page_config(page_title="AlphaBot Quant Screener V7.5", layout="wide")
-st.title("AlphaBot Quant Screener V7.5")
+st.set_page_config(page_title="AlphaBot Quant Screener V7.6", layout="wide")
+st.title("AlphaBot Quant Screener V7.6")
 
 # =========================
 # LOAD DATA
