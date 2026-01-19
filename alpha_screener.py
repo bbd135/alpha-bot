@@ -44,14 +44,14 @@ EXCLUDE_NON_US = True
 EXCLUDE_REITS = True
 MIN_ANALYSTS = 5
 
-# SENTIMENT (V7.6 Strict & Clamped)
+# SENTIMENT (V7.7 Strict & Clamped)
 FLOOR_BUY_RATIO = 0.65       # Hard floor: Shrunk Score < 65% = Kicked out
 STREAK_ON = 0.80             # Streak Start: Shrunk Score >= 80%
 STREAK_OFF = 0.75            # Hysteresis: Shrunk Score >= 75%
 MAX_STREAK_DAYS = 90         # Hard Cap for scoring AND display
 DAYS_INTO_SOFT_CAP = 0.25    # Multiplier for days into current month
 
-# SCORING WEIGHTS (V7.6: Quality Focus)
+# SCORING WEIGHTS (V7.7: Quality Focus)
 WEIGHT_FUNDAMENTALS = 0.80   
 WEIGHT_SENTIMENT = 0.20      
 
@@ -72,11 +72,11 @@ BAYESIAN_K = 5
 GLOBAL_BUY_AVG = 0.55        
 
 # API SETTINGS
-# V7.6: Default increased to 290 for Paid Plan (Safety buffer for 300 limit)
+# V7.7: Paid Plan Speed (290 calls/min)
 MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "290"))
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
-print("\n--- ALPHA-BOT V7.6 (HIGH SPEED) ---\n")
+print("\n--- ALPHA-BOT V7.7 (CORRECTED KEYS) ---\n")
 
 # =========================
 # CLASSES
@@ -185,16 +185,11 @@ def finnhub_get(path, params):
 
 def blended_rank(df, value_col, group_col, higher_is_better):
     K = 20
-    # If column is all NaN, return 50s
     if df[value_col].isnull().all(): return pd.Series(50, index=df.index)
     
-    # Global Rank (skipping NaNs automatically)
     global_rank = df[value_col].rank(pct=True)
-    
-    # Sector Rank
     sector_rank = df.groupby("Sector")[value_col].rank(pct=True).fillna(global_rank)
     
-    # Sub-Industry Rank
     sub_groups = df.groupby(group_col)[value_col]
     sub_rank = sub_groups.rank(pct=True).fillna(sector_rank)
     sub_counts = sub_groups.transform("count")
@@ -398,12 +393,12 @@ for i, sym in enumerate(universe):
         eps_src = "5Y"
     if pd.isna(eps_g): eps_src = "NA"
     
-    # 6. Data Row (V7.6 PRO METRICS)
+    # 6. Data Row (V7.7 PRO METRICS - CORRECTED KEYS)
     pe = safe_num(metric.get("peBasicExclExtraTTM"))
     ps = safe_num(metric.get("psTTM"))
     
-    # EV/EBITDA Logic
-    ev_ebitda_raw = safe_num(metric.get("evToEbitdaTTM"))
+    # EV/EBITDA Logic (Key: evEbitdaTTM)
+    ev_ebitda_raw = safe_num(metric.get("evEbitdaTTM"))
     ev_ebitda_used = np.nan
     ev_src = "Missing"
     
@@ -420,7 +415,9 @@ for i, sym in enumerate(universe):
     
     roe = safe_num(metric.get("roeTTM"))
     op_margin = safe_num(metric.get("operatingMarginTTM"))
-    roic = safe_num(metric.get("roicTTM"))
+    
+    # ROIC Logic (Key: roiTTM)
+    roic = safe_num(metric.get("roiTTM"))
     
     roic_src = "TTM" if not pd.isna(roic) else "Missing"
 
@@ -522,7 +519,7 @@ if rows:
     df["Sentiment_Score"] = (df["Consensus_Score"]*0.6) + (df["Streak_Score"]*0.4)
     df["Alpha_Score"] = (df["Fundamental_Score"]*WEIGHT_FUNDAMENTALS) + (df["Sentiment_Score"]*WEIGHT_SENTIMENT)
     
-    # --- V7.6 GATES & PENALTIES ---
+    # --- V7.7 GATES & PENALTIES ---
     df["Alpha_Score_PreGates"] = df["Alpha_Score"] 
     
     # 1. Momentum Gate
