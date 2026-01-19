@@ -5,6 +5,7 @@ import math
 import time
 import requests
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -43,23 +44,23 @@ EXCLUDE_NON_US = True
 EXCLUDE_REITS = True
 MIN_ANALYSTS = 5
 
-# SENTIMENT (V6.6 Strict & Clamped)
+# SENTIMENT (V7.5 Strict & Clamped)
 FLOOR_BUY_RATIO = 0.65       # Hard floor: Shrunk Score < 65% = Kicked out
 STREAK_ON = 0.80             # Streak Start: Shrunk Score >= 80%
 STREAK_OFF = 0.75            # Hysteresis: Shrunk Score >= 75%
 MAX_STREAK_DAYS = 90         # Hard Cap for scoring AND display
 DAYS_INTO_SOFT_CAP = 0.25    # Multiplier for days into current month
 
-# SCORING WEIGHTS (V6.6: 80/20 Split)
-WEIGHT_FUNDAMENTALS = 0.80   # Stronger focus on financial health
-WEIGHT_SENTIMENT = 0.20      # Reduced analyst/streak noise
+# SCORING WEIGHTS (V7.5: Quality Focus)
+WEIGHT_FUNDAMENTALS = 0.80   
+WEIGHT_SENTIMENT = 0.20      
 
 FUND_WEIGHTS = {
     "Value_S": 0.20,
     "Growth_S": 0.20,
-    "Prof_S": 0.20,
+    "Prof_S": 0.25,      # Quality is King
     "Mom_S": 0.15,
-    "Rev_S": 0.25
+    "Rev_S": 0.20        # Reduced Proxy Weight
 }
 
 MOM_WEIGHTS = {
@@ -74,7 +75,7 @@ GLOBAL_BUY_AVG = 0.55
 MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "55"))
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
-print("\n--- ☁️ ALPHA-BOT V6.6 (SMART GROWTH & AUDIT) ☁️ ---\n")
+print("\n--- ALPHA-BOT V7.5 (QUANT ENGINE) ---\n")
 
 # =========================
 # CLASSES
@@ -101,14 +102,14 @@ class GICSManager:
         if self.cache_file.exists():
             try:
                 with open(self.cache_file, "r") as f:
-                    print("✅ Loaded GICS from cache.")
+                    print("Loaded GICS from cache.")
                     return json.load(f)
             except:
                 pass
         return self._scrape_wikipedia()
 
     def _scrape_wikipedia(self):
-        print("🌍 Scraping Wikipedia GICS Data...")
+        print("Scraping Wikipedia GICS Data...")
         mapping = {}
         urls = [
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
@@ -139,7 +140,7 @@ class GICSManager:
                             }
                         break
             except Exception as e:
-                print(f"⚠️ Error {url}: {e}")
+                print(f"Error {url}: {e}")
 
         with open(self.cache_file, "w") as f:
             json.dump(mapping, f)
@@ -183,11 +184,16 @@ def finnhub_get(path, params):
 
 def blended_rank(df, value_col, group_col, higher_is_better):
     K = 20
+    # If column is all NaN, return 50s
     if df[value_col].isnull().all(): return pd.Series(50, index=df.index)
     
+    # Global Rank (skipping NaNs automatically)
     global_rank = df[value_col].rank(pct=True)
+    
+    # Sector Rank
     sector_rank = df.groupby("Sector")[value_col].rank(pct=True).fillna(global_rank)
     
+    # Sub-Industry Rank
     sub_groups = df.groupby(group_col)[value_col]
     sub_rank = sub_groups.rank(pct=True).fillna(sector_rank)
     sub_counts = sub_groups.transform("count")
@@ -215,17 +221,10 @@ def get_shrunk_ratio(row):
         return None
 
 def calculate_asymptotic_score(streak_days):
-    """
-    Score = 100 * (1 - e^(-k * days))
-    k=0.021 means 90 days ~= 85 score.
-    """
     k = 0.021
     return 100.0 * (1.0 - math.exp(-k * streak_days))
 
 def calculate_streak_shrunk(rec_list, today_date):
-    """
-    Returns: (raw_days, capped_days, score)
-    """
     if not rec_list: return 0.0, 0.0, 0.0
     
     # 1. Hysteresis Check
@@ -280,6 +279,9 @@ print(f"Scanning {len(universe)} tickers...")
 rows = []
 today = datetime.now(timezone.utc).date()
 today_str = today.strftime("%Y-%m-%d")
+
+# Note: We will name output files V7 to match new versioning
+OUTPUT_FILENAME = f"alpha_v7_results_{today_str}.csv"
 
 for i, sym in enumerate(universe):
     if i % 50 == 0: print(f"Processing {i}/{len(universe)}...", end="\r")
@@ -350,20 +352,6 @@ for i, sym in enumerate(universe):
                 best_row = row
         except: continue
         
-    if best_row is None:
-        best_diff = 10**9
-        for row in rec:
-            try:
-                row_date = datetime.strptime(row.get("period",""), "%Y-%m-%d").date()
-                t_old = sum(float(row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
-                if t_old <= 0: continue
-                
-                diff = abs((row_date - target_date).days)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_row = row
-            except: continue
-            
     if best_row is not None:
         t_old = sum(float(best_row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
         old_r = (float(best_row.get("strongBuy",0) or 0) + float(best_row.get("buy",0) or 0)) / t_old
@@ -380,51 +368,79 @@ for i, sym in enumerate(universe):
     # 5. Metrics
     metric = (finnhub_get("/stock/metric", {"symbol": sym, "metric": "all"}) or {}).get("metric", {})
     
-    # V6.6: SMART EPS LOGIC (Recency Preference)
+    # SMART EPS LOGIC
     eps_ttm = safe_num(metric.get("epsGrowthTTMYoy"))
     eps_3y  = safe_num(metric.get("epsGrowth3Y"))
     eps_5y  = safe_num(metric.get("epsGrowth5Y"))
     
     eps_g = eps_ttm
     eps_src = "TTM_YoY"
-    
     if pd.isna(eps_g):
         eps_g = eps_3y
         eps_src = "3Y"
-        
     if pd.isna(eps_g):
         eps_g = eps_5y
         eps_src = "5Y"
-        
-    if pd.isna(eps_g):
-        eps_src = "NA"
+    if pd.isna(eps_g): eps_src = "NA"
     
-    # 6. Data Row
+    # 6. Data Row (V7.5 PRO METRICS)
     pe = safe_num(metric.get("peBasicExclExtraTTM"))
     ps = safe_num(metric.get("psTTM"))
     
+    # EV/EBITDA Logic
+    ev_ebitda_raw = safe_num(metric.get("evToEbitdaTTM"))
+    ev_ebitda_used = np.nan
+    ev_src = "Missing"
+    
+    if not pd.isna(ev_ebitda_raw):
+        if ev_ebitda_raw <= 0:
+            ev_ebitda_used = 1e6 # Penalize invalid/negative
+            ev_src = "Invalid<=0"
+        else:
+            ev_ebitda_used = ev_ebitda_raw
+            ev_src = "TTM"
+
     rev_g = safe_num(metric.get("revenueGrowthTTMYoy"))
     if pd.isna(rev_g): rev_g = safe_num(metric.get("revenueGrowth5Y"))
     
+    roe = safe_num(metric.get("roeTTM"))
+    op_margin = safe_num(metric.get("operatingMarginTTM"))
+    roic = safe_num(metric.get("roicTTM"))
+    
+    roic_src = "TTM" if not pd.isna(roic) else "Missing"
+
     h52 = safe_num(metric.get("52WeekHigh"))
     l52 = safe_num(metric.get("52WeekLow"))
-    rng = (price - l52)/(h52 - l52) if (h52 > l52) else math.nan
+    
+    # V7.5 MOMENTUM RANGE FIX (Strict NaN Handling)
+    if pd.isna(price) or pd.isna(h52) or pd.isna(l52) or h52 <= l52:
+        mom_range = np.nan
+    else:
+        rng = (price - l52) / (h52 - l52)
+        mom_range = max(0.0, min(1.0, rng))
+    
+    mom_12m = safe_num(metric.get("52WeekPriceReturnDaily"))
 
     rows.append({
         "Ticker": sym, "Sector": gics_data["Sector"], "SubIndustry": gics_data["SubIndustry"],
         "Price": price,
         "PE_Rank": pe if (pe and pe > 0) else 1e6,
         "PS_Rank": ps if (ps and ps > 0) else 1e6,
+        "EV_EBITDA": ev_ebitda_raw,
+        "EV_EBITDA_Used": ev_ebitda_used,
+        "EV_EBITDA_Source": ev_src,
         "EPS_Growth": eps_g,
-        "EPS_Growth_Source": eps_src, # AUDIT
-        "EPS_Growth_TTMYoY": eps_ttm, # AUDIT
-        "EPS_Growth_3Y": eps_3y,      # AUDIT
-        "EPS_Growth_5Y": eps_5y,      # AUDIT
+        "EPS_Growth_Source": eps_src,
+        "EPS_Growth_TTMYoY": eps_ttm,
+        "EPS_Growth_3Y": eps_3y,
+        "EPS_Growth_5Y": eps_5y,
         "Rev_Growth": rev_g,
-        "ROE": safe_num(metric.get("roeTTM")),
-        "Op_Margin": safe_num(metric.get("operatingMarginTTM")),
-        "Mom_Range": max(0.0, min(1.0, rng)),
-        "Mom_12M": safe_num(metric.get("52WeekPriceReturnDaily")),
+        "ROE": roe,
+        "Op_Margin": op_margin,
+        "ROIC": roic,
+        "ROIC_Source": roic_src,
+        "Mom_Range": mom_range,
+        "Mom_12M": mom_12m,
         "Rev_Change": rec_change,
         "Rec_BuyRatio": raw_buy_ratio,
         "Shrunk_Ratio": shrunk_ratio,
@@ -439,22 +455,45 @@ for i, sym in enumerate(universe):
 # =========================
 if rows:
     df = pd.DataFrame(rows)
-    print(f"\n✅ Scoring {len(df)} eligible stocks...")
+    print(f"\nScoring {len(df)} eligible stocks...")
     
-    # Ranks
-    df["Value_S"] = pd.concat([blended_rank(df,"PE_Rank","SubIndustry",False), 
-                               blended_rank(df,"PS_Rank","SubIndustry",False)], axis=1).fillna(50).mean(axis=1)
+    # 1. VALUE
+    v_pe = blended_rank(df,"PE_Rank","SubIndustry",False)
+    v_ps = blended_rank(df,"PS_Rank","SubIndustry",False)
+    v_ev = blended_rank(df,"EV_EBITDA_Used","SubIndustry",False)
     
-    df["Growth_S"] = pd.concat([blended_rank(df,"EPS_Growth","SubIndustry",True), 
-                                blended_rank(df,"Rev_Growth","SubIndustry",True)], axis=1).fillna(50).mean(axis=1)
+    # V7.5 FIX: Prevent NaN propagation
+    df["Value_S"] = pd.concat([v_pe, v_ps, v_ev], axis=1).mean(axis=1).fillna(50)
     
-    df["Prof_S"] = pd.concat([blended_rank(df,"ROE","SubIndustry",True), 
-                              blended_rank(df,"Op_Margin","SubIndustry",True)], axis=1).fillna(50).mean(axis=1)
+    # 2. GROWTH
+    g_eps = blended_rank(df,"EPS_Growth","SubIndustry",True)
+    g_rev = blended_rank(df,"Rev_Growth","SubIndustry",True)
     
+    # V7.5 FIX: Prevent NaN propagation
+    df["Growth_S"] = pd.concat([g_eps, g_rev], axis=1).mean(axis=1).fillna(50)
+    
+    # 3. PROFITABILITY
+    p_roe = blended_rank(df,"ROE","SubIndustry",True)
+    p_margin = blended_rank(df,"Op_Margin","SubIndustry",True)
+    p_roic = blended_rank(df,"ROIC","SubIndustry",True)
+    
+    mask_roic_missing = df["ROIC"].isna()
+    p_roic[mask_roic_missing] = np.nan
+    
+    # V7.5 FIX: Prevent NaN propagation
+    df["Prof_S"] = pd.concat([p_roe, p_margin, p_roic], axis=1).mean(axis=1).fillna(50)
+    
+    # Smart Margin Floor (Normalize %)
+    op_clean = df["Op_Margin"].apply(lambda x: x / 100.0 if (not pd.isna(x) and x > 1.0) else x)
+    mask_thin_margin = op_clean.notna() & (op_clean < 0.05)
+    df.loc[mask_thin_margin, "Prof_S"] = df.loc[mask_thin_margin, "Prof_S"].clip(upper=60)
+    
+    # 4. MOMENTUM
     m1 = blended_rank(df,"Mom_Range","SubIndustry",True).fillna(50)
     m2 = blended_rank(df,"Mom_12M","SubIndustry",True).fillna(50)
     df["Mom_S"] = (m1 * MOM_WEIGHTS["Range"]) + (m2 * MOM_WEIGHTS["12M"])
     
+    # 5. REVISIONS
     df["Rev_S"] = blended_rank(df,"Rev_Change","SubIndustry",True).fillna(50)
 
     # Aggregates
@@ -471,29 +510,44 @@ if rows:
     df["Sentiment_Score"] = (df["Consensus_Score"]*0.6) + (df["Streak_Score"]*0.4)
     df["Alpha_Score"] = (df["Fundamental_Score"]*WEIGHT_FUNDAMENTALS) + (df["Sentiment_Score"]*WEIGHT_SENTIMENT)
     
-    # Gate
-    df["Min_Fund_Factor"] = df[["Value_S", "Growth_S", "Prof_S", "Mom_S", "Rev_S"]].min(axis=1)
-    df.loc[df["Min_Fund_Factor"] < 25, "Alpha_Score"] = df.loc[df["Min_Fund_Factor"] < 25, "Alpha_Score"].clip(upper=60)
+    # --- V7.5 GATES & PENALTIES ---
+    df["Alpha_Score_PreGates"] = df["Alpha_Score"] 
     
-    # V6.6 PENALTIES (Using the Smart EPS metric)
-    # 1. Negative EPS (Severe 50%)
+    # 1. Momentum Gate
+    mask_neg_mom = (df["Mom_12M"].notna()) & (df["Mom_12M"] < 0)
+    df.loc[mask_neg_mom, "Alpha_Score"] = df.loc[mask_neg_mom, "Alpha_Score"].clip(upper=50)
+
+    # 2. Min Factor Gate
+    df["Min_Fund_Factor"] = df[["Value_S", "Growth_S", "Prof_S", "Mom_S", "Rev_S"]].min(axis=1)
+    mask_lopsided = df["Min_Fund_Factor"] < 20
+    df.loc[mask_lopsided, "Alpha_Score"] = df.loc[mask_lopsided, "Alpha_Score"] * 0.50
+
+    # 3. EPS Penalties
     mask_neg_eps = (df["EPS_Growth"].notna()) & (df["EPS_Growth"] < 0)
     df.loc[mask_neg_eps, "Alpha_Score"] = df.loc[mask_neg_eps, "Alpha_Score"] * 0.50
     
-    # 2. Missing EPS (Severe 25%)
     mask_nan_eps = df["EPS_Growth"].isna()
     df.loc[mask_nan_eps, "Alpha_Score"] = df.loc[mask_nan_eps, "Alpha_Score"] * 0.75
     
+    # 4. Audit Flags
+    df["Momentum_Fail"] = mask_neg_mom
+    df["Lopsided_Fail"] = mask_lopsided
+    df["Neg_EPS_Fail"] = mask_neg_eps
+    df["Missing_EPS_Fail"] = mask_nan_eps
+    
     df = df.sort_values("Alpha_Score", ascending=False).reset_index(drop=True)
     
-    daily_path = DAILY_DIR / f"alpha_v6_results_{today_str}.csv"
+    daily_path = DAILY_DIR / OUTPUT_FILENAME
     df.to_csv(daily_path, index=False)
     df.to_csv(LATEST_CSV, index=False)
     
-    print(f"✅ Saved to {daily_path}")
+    print(f"Saved to {daily_path}")
 
     # --- TRACKING ---
-    daily_files = sorted(DAILY_DIR.glob("alpha_v6_results_*.csv"))
+    daily_files = sorted(DAILY_DIR.glob("alpha_v7_results_*.csv"), key=lambda p: p.name)
+    if not daily_files:
+        daily_files = sorted(DAILY_DIR.glob("alpha_v6_results_*.csv"), key=lambda p: p.name)
+
     diff_data = {"new_entrants": [], "movers": []}
     
     if len(daily_files) >= 2:
@@ -525,16 +579,30 @@ if rows:
                 json.dump(diff_data, f)
                 
         except Exception as e:
-            print(f"⚠️ Diff generation failed: {e}")
+            print(f"Diff generation failed: {e}")
 
 # LOGGING
 runtime_sec = int(time.time() - RUN_START)
+
+ev_missing_pct = 0.0
+roic_missing_pct = 0.0
+
+if "df" in locals() and isinstance(df, pd.DataFrame) and not df.empty:
+    if "EV_EBITDA_Used" in df.columns:
+        ev_missing_pct = float(df["EV_EBITDA_Used"].isna().mean())
+    if "ROIC" in df.columns:
+        roic_missing_pct = float(df["ROIC"].isna().mean())
+
 log_obj = {
     "date": today_str,
     "runtime_sec": runtime_sec,
     "universe": len(universe),
     "eligible": len(rows),
-    "exclusions": tracker.stats
+    "exclusions": tracker.stats,
+    "data_quality": {
+        "ev_missing_pct": round(ev_missing_pct * 100.0, 2),
+        "roic_missing_pct": round(roic_missing_pct * 100.0, 2)
+    }
 }
 with open(RUN_LOG_FILE, "a") as f:
     f.write(json.dumps(log_obj) + "\n")

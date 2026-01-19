@@ -12,8 +12,8 @@ RUN_LOG = RESULTS_DIR / "run_log.jsonl"
 LATEST = RESULTS_DIR / "latest.csv"
 DIFF_FILE = RESULTS_DIR / "daily_diff.json"
 
-st.set_page_config(page_title="Alpha Screener V6", layout="wide")
-st.title("📈 Alpha Screener V6 (Hybrid)")
+st.set_page_config(page_title="AlphaBot Quant Screener V7.5", layout="wide")
+st.title("AlphaBot Quant Screener V7.5")
 
 # =========================
 # LOAD DATA
@@ -36,9 +36,16 @@ run_df = pd.DataFrame(runs) if runs else pd.DataFrame()
 # =========================
 st.sidebar.header("Controls")
 
-# 1. Date Selection (Looking for V6 files)
-daily_files = sorted(DAILY_DIR.glob("alpha_v6_results_*.csv"))
-date_options = ["(latest)"] + [p.name.replace("alpha_v6_results_", "").replace(".csv", "") for p in daily_files[::-1]]
+# 1. Date Selection (Look for V7 first, then legacy V6)
+v7_files = sorted(DAILY_DIR.glob("alpha_v7_results_*.csv"), key=lambda x: x.name)
+v6_files = sorted(DAILY_DIR.glob("alpha_v6_results_*.csv"), key=lambda x: x.name)
+all_files = v7_files + v6_files
+# Sort all by date descending (latest first)
+all_files = sorted(all_files, key=lambda x: x.name)[::-1]
+
+date_options = ["(latest)"] + [p.name.replace("alpha_v7_results_", "").replace("alpha_v6_results_", "").replace(".csv", "") for p in all_files]
+# Deduplicate dates
+date_options = list(dict.fromkeys(date_options))
 
 choice = st.sidebar.selectbox("Select date", date_options)
 
@@ -55,9 +62,16 @@ def load_results(selected):
             return pd.read_csv(LATEST)
         return None
 
+    # Try V7 format first
+    path = DAILY_DIR / f"alpha_v7_results_{selected}.csv"
+    if path.exists():
+        return pd.read_csv(path)
+    
+    # Fallback to V6 format
     path = DAILY_DIR / f"alpha_v6_results_{selected}.csv"
     if path.exists():
         return pd.read_csv(path)
+        
     return None
 
 df = load_results(choice)
@@ -65,15 +79,12 @@ df = load_results(choice)
 # =========================
 # SECTION 1: MODEL HEALTH
 # =========================
-st.subheader("🩺 Model Health")
+st.subheader("Model Health")
 
 if not run_df.empty:
-    # Deterministic Deduplication:
-    # 1. Assign an index to preserve file order (latest runs are at the bottom)
+    # Deterministic Deduplication
     run_df["run_idx"] = range(len(run_df))
-    # 2. Sort by date and then by index
     run_df = run_df.sort_values(["date", "run_idx"])
-    # 3. Drop duplicates keeping the last one
     run_df = run_df.drop_duplicates(subset=["date"], keep="last")
     
     last = run_df.iloc[-1]
@@ -85,8 +96,8 @@ if not run_df.empty:
     c3.metric("Universe", int(last.get("universe", 0)))
     c4.metric("Eligible", int(last.get("eligible", 0)))
 
-    # Exclusions Chart (Last 5 Runs)
-    st.write("**Recent Exclusion Trends**")
+    # Exclusions Chart
+    st.write("Recent Exclusion Trends")
     ex_rows = []
     for _, r in run_df.iterrows():
         ex = r.get("exclusions", {}) or {}
@@ -98,22 +109,21 @@ if not run_df.empty:
         totals = ex_df.sum().sort_values(ascending=False)
         top_cols = list(totals.head(8).index)
         if top_cols:
-            st.bar_chart(ex_df[top_cols].iloc[-5:]) # Show last 5 unique dates
+            st.bar_chart(ex_df[top_cols].iloc[-5:])
 else:
     st.info("No run log found.")
 
 # =========================
-# SECTION 2: TRACKING (NEW)
+# SECTION 2: TRACKING
 # =========================
 if choice == "(latest)" and DIFF_FILE.exists():
     try:
         with open(DIFF_FILE, "r") as f:
             diff = json.load(f)
             
-        # New Entrants Banner
         new_entrants = diff.get("new_entrants", [])
         if new_entrants:
-            st.success(f"**🆕 New to Top 20 Today:** {', '.join(new_entrants)}")
+            st.success(f"New to Top 20 Today: {', '.join(new_entrants)}")
             
     except Exception as e:
         st.error(f"Error loading diffs: {e}")
@@ -121,7 +131,7 @@ if choice == "(latest)" and DIFF_FILE.exists():
 # =========================
 # SECTION 3: RANKINGS
 # =========================
-st.subheader("🏆 Top Picks")
+st.subheader("Top Picks")
 
 if df is None or df.empty:
     st.warning("No results file found yet.")
@@ -140,19 +150,19 @@ else:
         view = view.sort_values("Alpha_Score", ascending=False)
 
     # Display Table
-    st.write(f"Showing top **{top_n}** for: **{choice}**")
+    st.write(f"Showing top {top_n} for: {choice}")
     
-    # Columns to display (V6 specific)
-    # Note: 'Streak_Days' here will display the CAPPED value from the CSV
+    # Columns to display (Cleaned up list)
     cols_to_show = [
         "Ticker", "Alpha_Score", "Fundamental_Score", "Sentiment_Score", 
         "Streak_Days", "Analyst_Count", "Rec_BuyRatio", "Sector"
     ]
+    
     final_cols = [c for c in cols_to_show if c in view.columns]
     
     st.dataframe(view[final_cols].head(top_n), use_container_width=True)
 
     # Composition Chart
-    st.write("**Sector composition (top list)**")
+    st.write("Sector composition (top list)")
     if "Sector" in view.columns:
         st.bar_chart(view.head(top_n)["Sector"].value_counts())
