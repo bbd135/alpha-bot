@@ -9,8 +9,8 @@ RUN_LOG = RESULTS_DIR / "run_log.jsonl"
 LATEST = RESULTS_DIR / "latest.csv"
 DIFF_FILE = RESULTS_DIR / "daily_diff.json"
 
-st.set_page_config(page_title="AlphaBot Quant Screener V8.8", layout="wide")
-st.title("AlphaBot Quant Screener V8.8")
+st.set_page_config(page_title="AlphaBot Quant Screener V8.12", layout="wide")
+st.title("AlphaBot Quant Screener V8.12")
 
 # LOAD DATA
 runs = []
@@ -37,15 +37,33 @@ top_n = st.sidebar.slider("Top N", 5, 50, 20)
 min_alpha = st.sidebar.slider("Min Alpha Score", 0, 100, 0)
 
 # HELPER
-def load_results(selected):
+def load_results(selected, mode):
+    # Determine which file suffix to look for
+    file_prefix = "alpha_v8_results_" if mode == "Alpha Score" else "alpha_v8_candidates_"
+    
     if selected == "(latest)":
-        if LATEST.exists(): return pd.read_csv(LATEST)
+        if mode == "Alpha Score":
+            if LATEST.exists(): return pd.read_csv(LATEST)
+        else:
+            cand_latest = RESULTS_DIR / "latest_candidates.csv"
+            if cand_latest.exists(): return pd.read_csv(cand_latest)
         return None
-    path = DAILY_DIR / f"alpha_v8_results_{selected}.csv"
-    if path.exists(): return pd.read_csv(path)
+
+    target_file = DAILY_DIR / f"{file_prefix}{selected}.csv"
+    
+    if target_file.exists():
+        return pd.read_csv(target_file)
+    
+    # Fallback: If Candidates file missing, load Survivors file
+    if mode == "Fundamental Score":
+        fallback = DAILY_DIR / f"alpha_v8_results_{selected}.csv"
+        if fallback.exists():
+            st.toast("Fundamental view not available for this date. Showing Survivors.", icon="⚠️")
+            return pd.read_csv(fallback)
+            
     return None
 
-df = load_results(choice)
+df = load_results(choice, sort_option)
 
 # MODEL HEALTH
 st.subheader("Model Health")
@@ -96,25 +114,36 @@ else:
     view = df.copy()
     if sector_choice != "(all)": view = view[view["Sector"] == sector_choice]
     
-    # V8.8: Smart Filter Logic
+    # Conditional Filtering & Sorting
     if sort_option == "Alpha Score":
         if "Alpha_Score" in view.columns:
             view = view[view["Alpha_Score"] >= min_alpha]
         sort_col = "Alpha_Score"
     else:
-        # Fundamental Score Sort (Show pure quant results)
-        sort_col = "Fundamental_Score"
+        # V8.12 FIX: Handle column name difference in fallback files
+        if "Fundamental_Score" in view.columns:
+            sort_col = "Fundamental_Score"
+        elif "FundamentalPlusRev_Score" in view.columns:
+            sort_col = "FundamentalPlusRev_Score"
+        else:
+            sort_col = None # Should fail gracefully
         
-    if sort_col in view.columns:
+    if sort_col and sort_col in view.columns:
         view = view.sort_values(sort_col, ascending=False)
-        
+    
     st.write(f"Showing top {top_n} sorted by {sort_option}")
     
-    # V8.8 Columns
-    cols = ["Ticker", "Name", "Alpha_Score", "Fundamental_Score", 
-            "Value_Grade", "Growth_Grade", "Prof_Grade", "Mom_Grade", "Rev_Grade",
-            "Valuation_Fail", "Sentiment_Score", "Analyst_Count", "Sector"]
-    
+    # Dynamic Columns based on View
+    if sort_option == "Alpha Score":
+        cols = ["Ticker", "Name", "Alpha_Score", "FundamentalPlusRev_Score", 
+                "Value_Grade", "Growth_Grade", "Prof_Grade", "Mom_Grade", "Rev_Grade",
+                "Val_Fail", "Mom_Fail", "Sentiment_Score", "Analyst_Count", "Sector"]
+    else:
+        # Candidates view
+        cols = ["Ticker", "Name", "Fundamental_Score", 
+                "Value_Grade", "Growth_Grade", "Prof_Grade", "Mom_Grade",
+                "Sector", "Price", "PE_Rank"]
+
     final_cols = [c for c in cols if c in view.columns]
     st.dataframe(view[final_cols].head(top_n), use_container_width=True)
     

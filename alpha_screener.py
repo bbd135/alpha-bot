@@ -36,6 +36,7 @@ DAILY_DIR.mkdir(parents=True, exist_ok=True)
 GICS_CACHE_FILE = DATA_DIR / "sp1500_gics_map.json"
 RUN_LOG_FILE = RESULTS_DIR / "run_log.jsonl"
 LATEST_CSV = RESULTS_DIR / "latest.csv"
+LATEST_CANDIDATES_CSV = RESULTS_DIR / "latest_candidates.csv"
 DIFF_FILE = RESULTS_DIR / "daily_diff.json"
 
 # STAGE 1 FILTERS (The Census)
@@ -75,6 +76,11 @@ MOM_WEIGHTS = {
 # DYNAMIC BLEND CONSTANT
 K_BLEND = 20
 
+# GATING CONSTANTS
+VAL_THRESHOLD = 0.35      
+MOM_THRESHOLD = 0.30      
+PENALTY_STRENGTH = 0.5    
+
 BAYESIAN_K = 5               
 GLOBAL_BUY_AVG = 0.55        
 
@@ -82,7 +88,7 @@ GLOBAL_BUY_AVG = 0.55
 MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "290"))
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
-print("\n--- ALPHA-BOT V8.8 (ROBUST & CONSISTENT) ---\n")
+print("\n--- ALPHA-BOT V8.12 (DISTINCT SCORES) ---\n")
 
 # =========================
 # CLASSES
@@ -190,10 +196,10 @@ def finnhub_get(path, params):
     return None
 
 def winsorize_series_by_group(df, target_col, group_col, lower=0.05, upper=0.95):
-    # V8.8: Guard against tiny groups
+    # Guard against tiny groups
     def clip_group(x):
         x2 = x.dropna()
-        if len(x2) < 5: return x # Don't clip micro-groups
+        if len(x2) < 5: return x
         return x.clip(lower=x2.quantile(lower), upper=x2.quantile(upper))
     return df.groupby(group_col)[target_col].transform(clip_group)
 
@@ -388,7 +394,7 @@ winsor_cols = ["EPS_Growth", "Rev_Growth", "Mom_12M", "Mom_Range", "ROE", "Op_Ma
 for c in winsor_cols:
     df_pop[f"{c}_Win"] = winsorize_series_by_group(df_pop, c, "Sector")
 
-# 1. VALUE (100% Sector)
+# 1. VALUE
 v_pe = dynamic_sector_rank(df_pop, "PE_Rank", False, use_fixed_sector=True)
 v_ps = dynamic_sector_rank(df_pop, "PS_Rank", False, use_fixed_sector=True)
 v_ev = dynamic_sector_rank(df_pop, "EV_EBITDA_Used", False, use_fixed_sector=True)
@@ -401,12 +407,12 @@ v_pb[~mask_fin] = np.nan
 
 df_pop["Value_S"] = pd.concat([v_pe, v_ps, v_ev, v_pb], axis=1).mean(axis=1).fillna(50)
 
-# 2. GROWTH (Dynamic Blend)
+# 2. GROWTH
 g_eps = dynamic_sector_rank(df_pop, "EPS_Growth_Win", True, use_fixed_sector=False)
 g_rev = dynamic_sector_rank(df_pop, "Rev_Growth_Win", True, use_fixed_sector=False)
 df_pop["Growth_S"] = pd.concat([g_eps, g_rev], axis=1).mean(axis=1).fillna(50)
 
-# 3. PROFITABILITY (100% Sector)
+# 3. PROFITABILITY
 p_roe = dynamic_sector_rank(df_pop, "ROE_Win", True, use_fixed_sector=True)
 p_margin = dynamic_sector_rank(df_pop, "Op_Margin_Win", True, use_fixed_sector=True)
 p_roic = dynamic_sector_rank(df_pop, "ROIC_Win", True, use_fixed_sector=True)
@@ -418,11 +424,10 @@ p_roic[mask_fin] = np.nan
 
 df_pop["Prof_S"] = pd.concat([p_roe, p_margin, p_roic], axis=1).mean(axis=1).fillna(50)
 
-# V8.8: Use Winsorized margin for thin-margin check to match ranking logic
 mask_thin = df_pop["Op_Margin_Win"].notna() & (df_pop["Op_Margin_Win"] < 0.05) & (~mask_fin)
 df_pop.loc[mask_thin, "Prof_S"] = df_pop.loc[mask_thin, "Prof_S"].clip(upper=60)
 
-# 4. MOMENTUM (Dynamic Blend)
+# 4. MOMENTUM
 m1 = dynamic_sector_rank(df_pop, "Mom_Range_Win", True, use_fixed_sector=False).fillna(50)
 m2 = dynamic_sector_rank(df_pop, "Mom_12M_Win", True, use_fixed_sector=False).fillna(50)
 df_pop["Mom_S"] = (m1 * MOM_WEIGHTS["Range"]) + (m2 * MOM_WEIGHTS["12M"])
@@ -449,9 +454,23 @@ df_pop["Growth_Grade"] = pct_to_letter(df_pop["Growth_Pct"])
 df_pop["Prof_Grade"] = pct_to_letter(df_pop["Prof_Pct"])
 df_pop["Mom_Grade"] = pct_to_letter(df_pop["Mom_Pct"])
 
+# --- V8.12: DEDUPE & SAVE CANDIDATES (Fundamental View) ---
+df_pop_sorted = df_pop.sort_values("Fundamental_Score", ascending=False).reset_index(drop=True)
+
+# V8.12 Fix: Dedupe BEFORE Head to ensure full list
+df_pop_sorted["Name_Key"] = df_pop_sorted["Name"].astype(str).str.lower().str.replace(r"[^a-z0-9]", "", regex=True)
+df_pop_deduped = df_pop_sorted.drop_duplicates(subset=["Name_Key"], keep="first")
+
+candidates_export = df_pop_deduped.head(STAGE_2_CUTOFF).copy()
+
+CANDIDATES_FILENAME = f"alpha_v8_candidates_{today_str}.csv"
+cand_path = DAILY_DIR / CANDIDATES_FILENAME
+candidates_export.to_csv(cand_path, index=False)
+candidates_export.to_csv(LATEST_CANDIDATES_CSV, index=False)
+print(f"Saved Candidates (Fundamental View) to {cand_path}")
+
 # --- STAGE 2: THE INTERVIEW ---
-df_pop = df_pop.sort_values("Fundamental_Score", ascending=False)
-candidates = df_pop.head(STAGE_2_CUTOFF).copy()
+candidates = candidates_export.copy()
 
 print(f"\n--- STAGE 2: INTERVIEW ({len(candidates)} Candidates) ---")
 
@@ -476,7 +495,6 @@ for j, (_, row) in enumerate(candidates.iterrows(), start=1):
     
     total_analysts = sb + b + h + s + ss
     
-    # V8.8: Bulletproof Zero Guard
     if total_analysts <= 0:
         tracker.log("Stage2_ZeroAnalysts"); continue
     
@@ -536,7 +554,8 @@ if not df_final.empty:
     df_final["Rev_Pct"] = df_final.groupby("Sector")["Rev_S"].rank(pct=True)
     df_final["Rev_Grade"] = pct_to_letter(df_final["Rev_Pct"])
 
-    df_final["Fundamental_Score"] = (
+    # V8.12: Rename to FundamentalPlusRev_Score
+    df_final["FundamentalPlusRev_Score"] = (
         df_final["Value_S"] * FUND_WEIGHTS["Value_S"] +
         df_final["Growth_S"] * FUND_WEIGHTS["Growth_S"] +
         df_final["Prof_S"]  * FUND_WEIGHTS["Prof_S"] +
@@ -547,16 +566,20 @@ if not df_final.empty:
     df_final["Consensus_Score"] = (df_final["Shrunk_Ratio"] * 100.0).clip(0, 100)
     df_final["Sentiment_Score"] = (df_final["Consensus_Score"]*0.6) + (df_final["Streak_Score"]*0.4)
     
-    df_final["Alpha_Score"] = (df_final["Fundamental_Score"]*WEIGHT_FUNDAMENTALS) + (df_final["Sentiment_Score"]*WEIGHT_SENTIMENT)
+    # Use new FundamentalPlusRev_Score for Alpha Calculation
+    df_final["Alpha_Score"] = (df_final["FundamentalPlusRev_Score"]*WEIGHT_FUNDAMENTALS) + (df_final["Sentiment_Score"]*WEIGHT_SENTIMENT)
     
-    # --- GATES ---
-    mask_bad_val = df_final["Value_Pct"] <= 0.40
-    df_final.loc[mask_bad_val, "Alpha_Score"] = df_final.loc[mask_bad_val, "Alpha_Score"].clip(upper=60)
+    # --- V8.9 SMOOTH GATES (V8.12 Clipped) ---
+    val_gap = (VAL_THRESHOLD - df_final["Value_Pct"]).clip(lower=0)
+    val_penalty_mult = (1.0 - (val_gap * PENALTY_STRENGTH)).clip(lower=0.0) # V8.12 Safety Clip
     
-    mask_bad_mom = df_final["Mom_Pct"] <= 0.33
-    df_final.loc[mask_bad_mom, "Alpha_Score"] = df_final.loc[mask_bad_mom, "Alpha_Score"].clip(upper=60)
+    mom_gap = (MOM_THRESHOLD - df_final["Mom_Pct"]).clip(lower=0)
+    mom_penalty_mult = (1.0 - (mom_gap * PENALTY_STRENGTH)).clip(lower=0.0) # V8.12 Safety Clip
     
-    df_final["Valuation_Fail"] = mask_bad_val | mask_bad_mom
+    df_final["Alpha_Score"] = df_final["Alpha_Score"] * val_penalty_mult * mom_penalty_mult
+    
+    df_final["Val_Fail"] = df_final["Value_Pct"] < VAL_THRESHOLD
+    df_final["Mom_Fail"] = df_final["Mom_Pct"] < MOM_THRESHOLD
     
     mask_neg_mom = (df_final["Mom_12M"].notna()) & (df_final["Mom_12M"] < 0)
     df_final.loc[mask_neg_mom, "Alpha_Score"] = df_final.loc[mask_neg_mom, "Alpha_Score"].clip(upper=50)
@@ -571,17 +594,14 @@ if not df_final.empty:
     mask_nan_eps = df_final["EPS_Growth"].isna()
     df_final.loc[mask_nan_eps, "Alpha_Score"] = df_final.loc[mask_nan_eps, "Alpha_Score"] * 0.75
 
-    # Dedupe
-    df_final["Name_Key"] = df_final["Name"].astype(str).str.lower().str.replace(r"[^a-z0-9]", "", regex=True)
-    df_final = df_final.sort_values("Alpha_Score", ascending=False)
-    df_final = df_final.drop_duplicates(subset=["Name_Key"], keep="first")
-    df_final = df_final.reset_index(drop=True)
+    # Dedupe Final (Already deduped at stage 1, but good practice to keep)
+    df_final = df_final.sort_values("Alpha_Score", ascending=False).reset_index(drop=True)
     
     OUTPUT_FILENAME = f"alpha_v8_results_{today_str}.csv"
     daily_path = DAILY_DIR / OUTPUT_FILENAME
     df_final.to_csv(daily_path, index=False)
     df_final.to_csv(LATEST_CSV, index=False)
-    print(f"Saved to {daily_path}")
+    print(f"Saved Survivors (Alpha View) to {daily_path}")
     
     daily_files = sorted(DAILY_DIR.glob("alpha_v8_results_*.csv"), key=lambda p: p.name)
     if not daily_files: daily_files = sorted(DAILY_DIR.glob("alpha_v7_results_*.csv"), key=lambda p: p.name)
