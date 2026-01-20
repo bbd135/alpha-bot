@@ -216,7 +216,8 @@ def pct_to_letter(pct_series):
     """
     Maps 0-100 percentile (from 0.0 to 1.0 input) to SA-style letter grades.
     """
-    bins = [0.0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.60, 0.70, 0.80, 0.90, 0.93, 0.97, 1.0000001]
+    # FIXED: Added 0.50 to bins so len(bins) == len(labels) + 1
+    bins = [0.0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.93, 0.97, 1.0000001]
     labels = ["F","D-","D","D+","C-","C","C+","B-","B","B+","A-","A","A+"]
     return pd.cut(pct_series.clip(0,1), bins=bins, labels=labels, include_lowest=True)
 
@@ -532,9 +533,9 @@ if rows:
     df["Growth_Pct"] = df.groupby("Sector")["Growth_S"].rank(pct=True)
     df["Prof_Pct"] = df.groupby("Sector")["Prof_S"].rank(pct=True)
 
-    df["Value_Grade"] = pct_to_letter(df["Value_Pct"])
-    df["Growth_Grade"] = pct_to_letter(df["Growth_Pct"])
-    df["Prof_Grade"] = pct_to_letter(df["Prof_Pct"])
+    df["Value_Grade"] = pct_to_letter(df["Value_Pct"] * 100) # Pass 0-100 to match function
+    df["Growth_Grade"] = pct_to_letter(df["Growth_Pct"] * 100)
+    df["Prof_Grade"] = pct_to_letter(df["Prof_Pct"] * 100)
     
     # V8.1: The True Sector Gate (Bottom 10% of Sector)
     mask_bad_val = df["Value_Pct"] <= 0.10

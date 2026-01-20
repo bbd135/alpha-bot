@@ -13,7 +13,7 @@ LATEST = RESULTS_DIR / "latest.csv"
 DIFF_FILE = RESULTS_DIR / "daily_diff.json"
 
 st.set_page_config(page_title="AlphaBot V8.1 (Refined Gates)", layout="wide")
-st.title("AlphaBot V8.1 (Refined Gates)")
+st.title("AlphaBot Quant Screener V8.1")
 
 # =========================
 # LOAD DATA
