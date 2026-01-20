@@ -12,8 +12,8 @@ RUN_LOG = RESULTS_DIR / "run_log.jsonl"
 LATEST = RESULTS_DIR / "latest.csv"
 DIFF_FILE = RESULTS_DIR / "daily_diff.json"
 
-st.set_page_config(page_title="AlphaBot Quant Screener V7.7", layout="wide")
-st.title("AlphaBot Quant Screener V7.7")
+st.set_page_config(page_title="AlphaBot V8.1 (Refined Gates)", layout="wide")
+st.title("AlphaBot V8.1 (Refined Gates)")
 
 # =========================
 # LOAD DATA
@@ -36,15 +36,13 @@ run_df = pd.DataFrame(runs) if runs else pd.DataFrame()
 # =========================
 st.sidebar.header("Controls")
 
-# 1. Date Selection (Look for V7 first, then legacy V6)
+# 1. Date Selection
+v8_files = sorted(DAILY_DIR.glob("alpha_v8_results_*.csv"), key=lambda x: x.name)
 v7_files = sorted(DAILY_DIR.glob("alpha_v7_results_*.csv"), key=lambda x: x.name)
-v6_files = sorted(DAILY_DIR.glob("alpha_v6_results_*.csv"), key=lambda x: x.name)
-all_files = v7_files + v6_files
-# Sort all by date descending (latest first)
+all_files = v8_files + v7_files
 all_files = sorted(all_files, key=lambda x: x.name)[::-1]
 
-date_options = ["(latest)"] + [p.name.replace("alpha_v7_results_", "").replace("alpha_v6_results_", "").replace(".csv", "") for p in all_files]
-# Deduplicate dates
+date_options = ["(latest)"] + [p.name.replace("alpha_v8_results_", "").replace("alpha_v7_results_", "").replace(".csv", "") for p in all_files]
 date_options = list(dict.fromkeys(date_options))
 
 choice = st.sidebar.selectbox("Select date", date_options)
@@ -62,15 +60,11 @@ def load_results(selected):
             return pd.read_csv(LATEST)
         return None
 
-    # Try V7 format first
-    path = DAILY_DIR / f"alpha_v7_results_{selected}.csv"
-    if path.exists():
-        return pd.read_csv(path)
+    path = DAILY_DIR / f"alpha_v8_results_{selected}.csv"
+    if path.exists(): return pd.read_csv(path)
     
-    # Fallback to V6 format
-    path = DAILY_DIR / f"alpha_v6_results_{selected}.csv"
-    if path.exists():
-        return pd.read_csv(path)
+    path = DAILY_DIR / f"alpha_v7_results_{selected}.csv"
+    if path.exists(): return pd.read_csv(path)
         
     return None
 
@@ -82,36 +76,16 @@ df = load_results(choice)
 st.subheader("Model Health")
 
 if not run_df.empty:
-    # Deterministic Deduplication
     run_df["run_idx"] = range(len(run_df))
     run_df = run_df.sort_values(["date", "run_idx"])
     run_df = run_df.drop_duplicates(subset=["date"], keep="last")
-    
     last = run_df.iloc[-1]
 
-    # Metrics
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Last run date", str(last.get("date", "")))
     c2.metric("Runtime (min)", round(float(last.get("runtime_sec", 0)) / 60.0, 1))
     c3.metric("Universe", int(last.get("universe", 0)))
     c4.metric("Eligible", int(last.get("eligible", 0)))
-
-    # Exclusions Chart
-    st.write("Recent Exclusion Trends")
-    ex_rows = []
-    for _, r in run_df.iterrows():
-        ex = r.get("exclusions", {}) or {}
-        row = {"date": r["date"], **ex}
-        ex_rows.append(row)
-    
-    if ex_rows:
-        ex_df = pd.DataFrame(ex_rows).fillna(0).set_index("date")
-        totals = ex_df.sum().sort_values(ascending=False)
-        top_cols = list(totals.head(8).index)
-        if top_cols:
-            st.bar_chart(ex_df[top_cols].iloc[-5:])
-else:
-    st.info("No run log found.")
 
 # =========================
 # SECTION 2: TRACKING
@@ -120,11 +94,9 @@ if choice == "(latest)" and DIFF_FILE.exists():
     try:
         with open(DIFF_FILE, "r") as f:
             diff = json.load(f)
-            
         new_entrants = diff.get("new_entrants", [])
         if new_entrants:
             st.success(f"New to Top 20 Today: {', '.join(new_entrants)}")
-            
     except Exception as e:
         st.error(f"Error loading diffs: {e}")
 
@@ -136,7 +108,6 @@ st.subheader("Top Picks")
 if df is None or df.empty:
     st.warning("No results file found yet.")
 else:
-    # Sector Filter
     sector_options = ["(all)"] + sorted(df["Sector"].dropna().unique().tolist())
     sector_choice = st.sidebar.selectbox("Sector filter", sector_options)
 
@@ -144,17 +115,15 @@ else:
     if sector_choice != "(all)":
         view = view[view["Sector"] == sector_choice]
 
-    # Alpha Filter
     if "Alpha_Score" in view.columns:
         view = view[view["Alpha_Score"] >= min_alpha]
         view = view.sort_values("Alpha_Score", ascending=False)
 
-    # Display Table
     st.write(f"Showing top {top_n} for: {choice}")
     
-    # Columns to display (Cleaned up list)
     cols_to_show = [
-        "Ticker", "Alpha_Score", "Fundamental_Score", "Sentiment_Score", 
+        "Ticker", "Alpha_Score", "Value_Grade", "Prof_Grade", 
+        "Valuation_Fail", "Fundamental_Score", "Sentiment_Score", 
         "Streak_Days", "Analyst_Count", "Rec_BuyRatio", "Sector"
     ]
     
@@ -162,7 +131,5 @@ else:
     
     st.dataframe(view[final_cols].head(top_n), use_container_width=True)
 
-    # Composition Chart
-    st.write("Sector composition (top list)")
     if "Sector" in view.columns:
         st.bar_chart(view.head(top_n)["Sector"].value_counts())
