@@ -214,9 +214,10 @@ def blended_sector_rank(df, value_col, higher_is_better, w_sector=0.90):
 
 def pct_to_letter(pct_series):
     """
-    Maps 0-100 percentile (from 0.0 to 1.0 input) to SA-style letter grades.
+    Maps 0.0-1.0 percentile to SA-style letter grades.
+    EXPECTS DECIMAL INPUT (0.0 to 1.0).
     """
-    # FIXED: Added 0.50 to bins so len(bins) == len(labels) + 1
+    # Fixed Bins: 14 edges for 13 labels (Added 0.50)
     bins = [0.0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.93, 0.97, 1.0000001]
     labels = ["F","D-","D","D+","C-","C","C+","B-","B","B+","A-","A","A+"]
     return pd.cut(pct_series.clip(0,1), bins=bins, labels=labels, include_lowest=True)
@@ -477,7 +478,7 @@ if rows:
     # V8.1: Financials Logic (PE + PB only)
     mask_fin = df["Sector"] == "Financials"
     v_ev[mask_fin] = np.nan 
-    v_ps[mask_fin] = np.nan # V8.1: Drop PS for Banks
+    v_ps[mask_fin] = np.nan 
     v_pb[~mask_fin] = np.nan 
     
     df["Value_S"] = pd.concat([v_pe, v_ps, v_ev, v_pb], axis=1).mean(axis=1).fillna(50)
@@ -533,9 +534,10 @@ if rows:
     df["Growth_Pct"] = df.groupby("Sector")["Growth_S"].rank(pct=True)
     df["Prof_Pct"] = df.groupby("Sector")["Prof_S"].rank(pct=True)
 
-    df["Value_Grade"] = pct_to_letter(df["Value_Pct"] * 100) # Pass 0-100 to match function
-    df["Growth_Grade"] = pct_to_letter(df["Growth_Pct"] * 100)
-    df["Prof_Grade"] = pct_to_letter(df["Prof_Pct"] * 100)
+    # FIXED V8.1: Pass raw 0-1 percentile (no multiply by 100)
+    df["Value_Grade"] = pct_to_letter(df["Value_Pct"])
+    df["Growth_Grade"] = pct_to_letter(df["Growth_Pct"])
+    df["Prof_Grade"] = pct_to_letter(df["Prof_Pct"])
     
     # V8.1: The True Sector Gate (Bottom 10% of Sector)
     mask_bad_val = df["Value_Pct"] <= 0.10
