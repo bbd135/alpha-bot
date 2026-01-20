@@ -46,7 +46,7 @@ EXCLUDE_REITS = True
 
 # STAGE 2 FILTERS (The Interview)
 MIN_ANALYSTS = 5
-STAGE_2_CUTOFF = 500  # Number of candidates to send to Stage 2
+STAGE_2_CUTOFF = 500
 
 # SENTIMENT
 FLOOR_BUY_RATIO = 0.65       
@@ -82,7 +82,7 @@ GLOBAL_BUY_AVG = 0.55
 MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "290"))
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
-print("\n--- ALPHA-BOT V8.6 (PRODUCTION STABLE) ---\n")
+print("\n--- ALPHA-BOT V8.8 (ROBUST & CONSISTENT) ---\n")
 
 # =========================
 # CLASSES
@@ -190,45 +190,32 @@ def finnhub_get(path, params):
     return None
 
 def winsorize_series_by_group(df, target_col, group_col, lower=0.05, upper=0.95):
-    """
-    Clips outliers per sector to keep the curve sane.
-    """
+    # V8.8: Guard against tiny groups
     def clip_group(x):
-        return x.clip(lower=x.quantile(lower), upper=x.quantile(upper))
-    
+        x2 = x.dropna()
+        if len(x2) < 5: return x # Don't clip micro-groups
+        return x.clip(lower=x2.quantile(lower), upper=x2.quantile(upper))
     return df.groupby(group_col)[target_col].transform(clip_group)
 
 def dynamic_sector_rank(df, value_col, higher_is_better, use_fixed_sector=False):
-    """
-    V8.3: Dynamic Blending.
-    Weight Sector = K / (N + K). Small N -> High Sector Weight.
-    """
     if df[value_col].isnull().all(): return pd.Series(50, index=df.index)
     
-    # 1. Sector Rank
     sector_rank = df.groupby("Sector")[value_col].rank(pct=True).fillna(0.5)
     
     if use_fixed_sector:
         if not higher_is_better: sector_rank = 1.0 - sector_rank
         return (sector_rank * 100.0).clip(0, 100)
         
-    # 2. SubIndustry Rank
     sub_rank = df.groupby("SubIndustry")[value_col].rank(pct=True).fillna(sector_rank)
-    
-    # 3. Dynamic Weighting
     sub_counts = df.groupby("SubIndustry")[value_col].transform("count")
     w_sector = K_BLEND / (sub_counts + K_BLEND)
     
-    # Blend
     blended = (w_sector * sector_rank) + ((1.0 - w_sector) * sub_rank)
     
     if not higher_is_better: blended = 1.0 - blended
     return (blended * 100.0).clip(0, 100)
 
 def pct_to_letter(pct_series):
-    """
-    Maps 0.0-1.0 percentile to SA-style letter grades.
-    """
     bins = [0.0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.93, 0.97, 1.0000001]
     labels = ["F","D-","D","D+","C-","C","C+","B-","B","B+","A-","A","A+"]
     return pd.cut(pct_series.clip(0,1), bins=bins, labels=labels, include_lowest=True)
@@ -309,7 +296,6 @@ pop_rows = []
 for i, sym in enumerate(universe):
     if i % 100 == 0: print(f"Census {i}/{len(universe)}...", end="\r")
     
-    # 1. Profile
     p2 = finnhub_get("/stock/profile2", {"symbol": sym})
     if not p2 or not p2.get("ticker"):
         tracker.log("API_Fail_Profile"); continue
@@ -325,7 +311,6 @@ for i, sym in enumerate(universe):
         if "REAL ESTATE" in gics_data["Sector"].upper() and "REIT" in gics_data["SubIndustry"].upper():
             tracker.log("REIT_GICS"); continue
 
-    # 2. Quote
     q = finnhub_get("/quote", {"symbol": sym})
     price = safe_num(q.get("c")) if q else math.nan
     
@@ -334,25 +319,21 @@ for i, sym in enumerate(universe):
     if price < MIN_PRICE:
         tracker.log("Low_Price"); continue
 
-    # 3. Metric (Fundamentals)
     metric = (finnhub_get("/stock/metric", {"symbol": sym, "metric": "all"}) or {}).get("metric", {})
     
-    # --- Extract Metrics ---
     eps_ttm = safe_num(metric.get("epsGrowthTTMYoy"))
     eps_3y  = safe_num(metric.get("epsGrowth3Y"))
     eps_5y  = safe_num(metric.get("epsGrowth5Y"))
-    
     eps_g = eps_ttm if not pd.isna(eps_ttm) else (eps_3y if not pd.isna(eps_3y) else eps_5y)
     
     pe = safe_num(metric.get("peBasicExclExtraTTM"))
     ps = safe_num(metric.get("psTTM"))
     
-    # V8.4/5/6: Handle EV/EBITDA
     ev_ebitda_raw = safe_num(metric.get("evEbitdaTTM"))
     if pd.isna(ev_ebitda_raw):
         ev_ebitda_used = np.nan
     elif ev_ebitda_raw <= 0:
-        ev_ebitda_used = 1e6 # Penalize negative/zero
+        ev_ebitda_used = 1e6 
     else:
         ev_ebitda_used = ev_ebitda_raw
 
@@ -379,7 +360,6 @@ for i, sym in enumerate(universe):
     
     mom_12m = safe_num(metric.get("52WeekPriceReturnDaily"))
 
-    # Append to Population
     pop_rows.append({
         "Ticker": sym, 
         "Name": company_name,
@@ -404,8 +384,7 @@ print(f"\nCensus Complete. Population size: {len(df_pop)}")
 
 # --- STAGE 1 SCORING ---
 
-# Winsorize
-winsor_cols = ["EPS_Growth", "Rev_Growth", "Mom_12M", "Mom_Range"]
+winsor_cols = ["EPS_Growth", "Rev_Growth", "Mom_12M", "Mom_Range", "ROE", "Op_Margin", "ROIC"]
 for c in winsor_cols:
     df_pop[f"{c}_Win"] = winsorize_series_by_group(df_pop, c, "Sector")
 
@@ -428,9 +407,9 @@ g_rev = dynamic_sector_rank(df_pop, "Rev_Growth_Win", True, use_fixed_sector=Fal
 df_pop["Growth_S"] = pd.concat([g_eps, g_rev], axis=1).mean(axis=1).fillna(50)
 
 # 3. PROFITABILITY (100% Sector)
-p_roe = dynamic_sector_rank(df_pop, "ROE", True, use_fixed_sector=True)
-p_margin = dynamic_sector_rank(df_pop, "Op_Margin", True, use_fixed_sector=True)
-p_roic = dynamic_sector_rank(df_pop, "ROIC", True, use_fixed_sector=True)
+p_roe = dynamic_sector_rank(df_pop, "ROE_Win", True, use_fixed_sector=True)
+p_margin = dynamic_sector_rank(df_pop, "Op_Margin_Win", True, use_fixed_sector=True)
+p_roic = dynamic_sector_rank(df_pop, "ROIC_Win", True, use_fixed_sector=True)
 
 mask_roic_missing = df_pop["ROIC"].isna()
 p_roic[mask_roic_missing] = np.nan
@@ -439,7 +418,8 @@ p_roic[mask_fin] = np.nan
 
 df_pop["Prof_S"] = pd.concat([p_roe, p_margin, p_roic], axis=1).mean(axis=1).fillna(50)
 
-mask_thin = df_pop["Op_Margin"].notna() & (df_pop["Op_Margin"] < 0.05) & (~mask_fin)
+# V8.8: Use Winsorized margin for thin-margin check to match ranking logic
+mask_thin = df_pop["Op_Margin_Win"].notna() & (df_pop["Op_Margin_Win"] < 0.05) & (~mask_fin)
 df_pop.loc[mask_thin, "Prof_S"] = df_pop.loc[mask_thin, "Prof_S"].clip(upper=60)
 
 # 4. MOMENTUM (Dynamic Blend)
@@ -447,10 +427,9 @@ m1 = dynamic_sector_rank(df_pop, "Mom_Range_Win", True, use_fixed_sector=False).
 m2 = dynamic_sector_rank(df_pop, "Mom_12M_Win", True, use_fixed_sector=False).fillna(50)
 df_pop["Mom_S"] = (m1 * MOM_WEIGHTS["Range"]) + (m2 * MOM_WEIGHTS["12M"])
 
-# Placeholder for Rev_S
 df_pop["Rev_S"] = 50.0 
 
-# Aggregates (Pre-Sentiment)
+# Aggregates
 df_pop["Fundamental_Score"] = (
     df_pop["Value_S"] * FUND_WEIGHTS["Value_S"] +
     df_pop["Growth_S"] * FUND_WEIGHTS["Growth_S"] +
@@ -459,7 +438,7 @@ df_pop["Fundamental_Score"] = (
     df_pop["Rev_S"]   * FUND_WEIGHTS["Rev_S"]
 )
 
-# --- POPULATION PERCENTILES ---
+# Population Percentiles
 df_pop["Value_Pct"] = df_pop.groupby("Sector")["Value_S"].rank(pct=True)
 df_pop["Growth_Pct"] = df_pop.groupby("Sector")["Growth_S"].rank(pct=True)
 df_pop["Prof_Pct"] = df_pop.groupby("Sector")["Prof_S"].rank(pct=True)
@@ -468,6 +447,7 @@ df_pop["Mom_Pct"] = df_pop.groupby("Sector")["Mom_S"].rank(pct=True)
 df_pop["Value_Grade"] = pct_to_letter(df_pop["Value_Pct"])
 df_pop["Growth_Grade"] = pct_to_letter(df_pop["Growth_Pct"])
 df_pop["Prof_Grade"] = pct_to_letter(df_pop["Prof_Pct"])
+df_pop["Mom_Grade"] = pct_to_letter(df_pop["Mom_Pct"])
 
 # --- STAGE 2: THE INTERVIEW ---
 df_pop = df_pop.sort_values("Fundamental_Score", ascending=False)
@@ -488,8 +468,17 @@ for j, (_, row) in enumerate(candidates.iterrows(), start=1):
     rec.sort(key=lambda x: x.get("period", ""), reverse=True)
     d = rec[0]
     
-    sb, b = float(d.get("strongBuy",0)), float(d.get("buy",0))
-    total_analysts = sb + b + float(d.get("hold",0)) + float(d.get("sell",0)) + float(d.get("strongSell",0))
+    sb = float(d.get("strongBuy", 0) or 0)
+    b  = float(d.get("buy", 0) or 0)
+    h  = float(d.get("hold", 0) or 0)
+    s  = float(d.get("sell", 0) or 0)
+    ss = float(d.get("strongSell", 0) or 0)
+    
+    total_analysts = sb + b + h + s + ss
+    
+    # V8.8: Bulletproof Zero Guard
+    if total_analysts <= 0:
+        tracker.log("Stage2_ZeroAnalysts"); continue
     
     if total_analysts < MIN_ANALYSTS:
         tracker.log("Stage2_LowAnalysts"); continue
@@ -513,15 +502,13 @@ for j, (_, row) in enumerate(candidates.iterrows(), start=1):
         try:
             r_date = datetime.strptime(r.get("period",""), "%Y-%m-%d").date()
             if r_date > target_date: continue
-            # Handle potential None values safely here too
             if sum(float(r.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"]) <= 0: continue
             diff = abs((r_date - target_date).days)
             if diff < best_diff:
                 best_diff = diff
                 best_row = r
         except: continue
-    
-    # V8.6 FIX: Safely calculate revision change (avoid float(None) crash)
+        
     if best_row:
         t_old = sum(float(best_row.get(k, 0) or 0) for k in ["strongBuy","buy","hold","sell","strongSell"])
         if t_old > 0:
@@ -543,11 +530,12 @@ print(f"\nInterview Complete. Survivors: {len(df_final)}")
 
 # --- FINAL SCORING ---
 if not df_final.empty:
-    # 1. Calculate Rev_S on survivors
     df_final["Rev_Change_Win"] = winsorize_series_by_group(df_final, "Rev_Change", "Sector")
     df_final["Rev_S"] = dynamic_sector_rank(df_final, "Rev_Change_Win", True, use_fixed_sector=False).fillna(50)
     
-    # 2. Recalculate Fundamental Score
+    df_final["Rev_Pct"] = df_final.groupby("Sector")["Rev_S"].rank(pct=True)
+    df_final["Rev_Grade"] = pct_to_letter(df_final["Rev_Pct"])
+
     df_final["Fundamental_Score"] = (
         df_final["Value_S"] * FUND_WEIGHTS["Value_S"] +
         df_final["Growth_S"] * FUND_WEIGHTS["Growth_S"] +
@@ -556,26 +544,20 @@ if not df_final.empty:
         df_final["Rev_S"]   * FUND_WEIGHTS["Rev_S"]
     )
     
-    # 3. Sentiment Score - Absolute
     df_final["Consensus_Score"] = (df_final["Shrunk_Ratio"] * 100.0).clip(0, 100)
     df_final["Sentiment_Score"] = (df_final["Consensus_Score"]*0.6) + (df_final["Streak_Score"]*0.4)
     
-    # 4. Alpha Score
     df_final["Alpha_Score"] = (df_final["Fundamental_Score"]*WEIGHT_FUNDAMENTALS) + (df_final["Sentiment_Score"]*WEIGHT_SENTIMENT)
     
     # --- GATES ---
-    
-    # GATE 1: Valuation (Bottom 40% of Population)
     mask_bad_val = df_final["Value_Pct"] <= 0.40
     df_final.loc[mask_bad_val, "Alpha_Score"] = df_final.loc[mask_bad_val, "Alpha_Score"].clip(upper=60)
     
-    # GATE 2: Momentum (Bottom 33% of Population)
     mask_bad_mom = df_final["Mom_Pct"] <= 0.33
     df_final.loc[mask_bad_mom, "Alpha_Score"] = df_final.loc[mask_bad_mom, "Alpha_Score"].clip(upper=60)
     
     df_final["Valuation_Fail"] = mask_bad_val | mask_bad_mom
     
-    # Standard Gates
     mask_neg_mom = (df_final["Mom_12M"].notna()) & (df_final["Mom_12M"] < 0)
     df_final.loc[mask_neg_mom, "Alpha_Score"] = df_final.loc[mask_neg_mom, "Alpha_Score"].clip(upper=50)
 
@@ -595,14 +577,12 @@ if not df_final.empty:
     df_final = df_final.drop_duplicates(subset=["Name_Key"], keep="first")
     df_final = df_final.reset_index(drop=True)
     
-    # Output
     OUTPUT_FILENAME = f"alpha_v8_results_{today_str}.csv"
     daily_path = DAILY_DIR / OUTPUT_FILENAME
     df_final.to_csv(daily_path, index=False)
     df_final.to_csv(LATEST_CSV, index=False)
     print(f"Saved to {daily_path}")
     
-    # Tracking
     daily_files = sorted(DAILY_DIR.glob("alpha_v8_results_*.csv"), key=lambda p: p.name)
     if not daily_files: daily_files = sorted(DAILY_DIR.glob("alpha_v7_results_*.csv"), key=lambda p: p.name)
     
