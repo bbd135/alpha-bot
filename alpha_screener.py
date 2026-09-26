@@ -44,6 +44,7 @@ MIN_PRICE = 10.0
 MIN_MKTCAP_MUSD = 500.0
 EXCLUDE_NON_US = True
 EXCLUDE_REITS = True
+UNIVERSE_REFRESH_DAYS = 30   # re-scrape the S&P 1500 lists monthly
 
 # STAGE 2 FILTERS (The Interview)
 MIN_ANALYSTS = 5
@@ -112,14 +113,40 @@ class GICSManager:
         self.mapping = self._load_or_scrape()
 
     def _load_or_scrape(self):
+        # Refresh the universe monthly so index joiners/leavers are picked up.
+        # The scrape date lives in a sidecar file because file mtimes reset on
+        # every Actions checkout. A failed refresh keeps the previous good list.
+        cached = None
         if self.cache_file.exists():
             try:
                 with open(self.cache_file, "r") as f:
-                    print("Loaded GICS from cache.")
-                    return json.load(f)
-            except:
+                    cached = json.load(f)
+            except (OSError, ValueError) as e:
+                print(f"GICS cache unreadable ({e}); rescraping.")
+
+        meta_file = self.cache_file.with_name("sp1500_gics_meta.json")
+        scraped = None
+        if meta_file.exists():
+            try:
+                scraped = datetime.strptime(json.loads(meta_file.read_text())["scraped"], "%Y-%m-%d").date()
+            except (OSError, ValueError, KeyError):
                 pass
-        return self._scrape_wikipedia()
+        today_utc = datetime.now(timezone.utc).date()
+        stale = scraped is None or (today_utc - scraped).days >= UNIVERSE_REFRESH_DAYS
+
+        if cached and not stale:
+            print(f"Loaded GICS from cache (scraped {scraped}).")
+            return cached
+        try:
+            mapping = self._scrape_wikipedia()
+            meta_file.write_text(json.dumps({"scraped": today_utc.strftime("%Y-%m-%d")}))
+            print(f"Universe refreshed from Wikipedia: {len(mapping)} tickers.")
+            return mapping
+        except RuntimeError as e:
+            if cached:
+                print(f"⚠️  Universe refresh failed, keeping previous list ({len(cached)} tickers): {e}")
+                return cached
+            raise
 
     def _scrape_wikipedia(self):
         print("Scraping Wikipedia GICS Data...")
