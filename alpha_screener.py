@@ -136,7 +136,12 @@ class GICSManager:
                 if any(n in str(c).lower() for n in needles): return c
             return None
 
+        # Minimum rows per page: a normal scrape gives ~503 / 400 / 600.
+        # Anything below means the page failed or changed layout.
+        min_rows = [480, 380, 570]
+        page_counts = []
         for url in urls:
+            count = 0
             try:
                 r = requests.get(url, headers=headers, timeout=20)
                 tables = pd.read_html(io.StringIO(r.text))
@@ -151,9 +156,16 @@ class GICSManager:
                                 "Sector": str(row[sec_col]),
                                 "SubIndustry": str(row[sub_col]) if sub_col else "Unknown"
                             }
+                            count += 1
                         break
             except Exception as e:
                 print(f"Error {url}: {e}")
+            page_counts.append(count)
+
+        # Fail loudly rather than cache a partial universe that later runs would reuse.
+        short = [(u, c, m) for u, c, m in zip(urls, page_counts, min_rows) if c < m]
+        if short:
+            raise RuntimeError(f"Wikipedia scrape incomplete, cache NOT written: {short}")
 
         with open(self.cache_file, "w") as f:
             json.dump(mapping, f)
@@ -387,6 +399,12 @@ for i, sym in enumerate(universe):
 
 df_pop = pd.DataFrame(pop_rows)
 print(f"\nCensus Complete. Population size: {len(df_pop)}")
+
+# Fail loudly if Finnhub is broadly failing (bad key, endpoint now premium, outage)
+# instead of quietly screening a fraction of the universe. Normal is ~1%.
+profile_fail_rate = tracker.stats.get("API_Fail_Profile", 0) / max(len(universe), 1)
+if profile_fail_rate > 0.10:
+    raise RuntimeError(f"Finnhub profile failures {profile_fail_rate:.0%} of universe (>10%); aborting")
 
 # --- STAGE 1 SCORING ---
 

@@ -1,7 +1,8 @@
-requests
-pandas
-numpy
-python-dotenv
-streamlit>=1.40.0
-lxml
-plotly
+# Exact versions from the successful run on 2026-09-26 (Python 3.11). Bump deliberately, not by accident.
+requests==2.34.2
+pandas==3.0.6
+numpy==2.4.6
+python-dotenv==1.2.3
+streamlit==1.64.0
+lxml==6.1.3
+plotly==7.1.0
