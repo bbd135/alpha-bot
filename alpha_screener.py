@@ -85,7 +85,7 @@ BAYESIAN_K = 5
 GLOBAL_BUY_AVG = 0.55        
 
 # API SETTINGS
-MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "290"))
+MAX_CALLS_PER_MIN = float(os.getenv("FINNHUB_MAX_CALLS_PER_MIN", "55")  # free tier is 60/min; keep margin)
 MIN_INTERVAL = 60.0 / MAX_CALLS_PER_MIN
 
 print("\n--- ALPHA-BOT V8.12 (DISTINCT SCORES) ---\n")
